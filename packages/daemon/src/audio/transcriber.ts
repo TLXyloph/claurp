@@ -56,10 +56,11 @@ export function createWhisperTranscriber(
       // Verified live: whisper-server's decode defaults (best_of=2, beam_size=-1 i.e.
       // greedy) measurably mis-transcribe short command phrases — e.g. "...with a haiku
       // in it" came back as "...with a High Coup in it" on the create-file fixture at
-      // defaults. Requesting beam search via these per-request form fields (both real,
-      // documented fields per `whisper-server --help` / the server's own embedded usage
-      // text) fixed it deterministically across repeated live runs, with no server-side
-      // flag changes needed.
+      // defaults. `beam_size`/`best_of` aren't in `whisper-server --help` (that only
+      // documents server-startup flags); they're per-request multipart fields, confirmed
+      // real via `strings` on the binary and functionally confirmed live (3x repeated,
+      // deterministic) — requesting beam search this way fixed the mis-transcription with
+      // no server-side flag changes needed.
       form.append("beam_size", "5");
       form.append("best_of", "5");
       const res = await fetch(`http://127.0.0.1:${port}/inference`, { method: "POST", body: form });
