@@ -35,36 +35,31 @@ export function classify(tool: string, detail: string): RiskClass {
 // delete/rewrite/discard something in a shell.
 // ---------------------------------------------------------------------------------------------
 
-// rm recursive-force: GNU short (bundled or separate, in either order, any case) and long-form
-// flags. Denies only when BOTH recursive-intent (-r/-R/--recursive) AND force-intent
-// (-f/--force) are present -- force alone (e.g. "rm -f file.txt", "docker rm -f container") is
-// a single-file delete, not the recursive-delete spec §5.4 targets, so it stays ask-able rather
-// than hard-denied.
+// rm recursive delete: GNU short (bundled or separate, any case) and long-form flags. Denies on
+// recursive-intent ALONE (-r/-R/--recursive) -- spec §5.4 targets "recursive/forced deletes",
+// and a bare recursive delete (e.g. "rm -r ./build", no -f) is already the dangerous operation
+// (it still prompts for confirmation per-file without -f, but it can still tear through a whole
+// directory tree). Force is not part of the deny condition at all: force-only (e.g. "rm -f
+// file.txt", "docker rm -f container") is a single-file delete, not a recursive one, so it
+// stays ask-able rather than hard-denied.
 //
 // Implemented as a token scan, not a single "search anywhere" regex: an unanchored pattern
-// can't tell an actual "-f"/"-rf" flag token apart from a "-f"/"-rf" substring buried inside an
-// unrelated filename (e.g. "out-file.txt"), so each whitespace-delimited token is matched
+// can't tell an actual "-r"/"-rf" flag token apart from an "-r"/"-rf" substring buried inside an
+// unrelated filename (e.g. "out-report.txt"), so each whitespace-delimited token is matched
 // against a flag pattern anchored to the *whole* token. Splitting on `/\s+/` is newline-safe
 // too (whitespace includes "\n"), so a line-continued command can't dodge this by breaking the
 // flag onto its own line.
 const RM_WORD_RE = /\brm\b/i;
-const SHORT_FLAG_RE = /^-[a-zA-Z]+$/; // e.g. -r, -f, -rf, -Rf, -fr (letters only after the dash)
+const SHORT_FLAG_RE = /^-[a-zA-Z]+$/; // e.g. -r, -f, -rf, -Rf, -fr, -i (letters only after the dash)
 const LONG_RECURSIVE_RE = /^--recursive$/i;
-const LONG_FORCE_RE = /^--force$/i;
 
-function isRmRecursiveForceDelete(detail: string): boolean {
+function isRmRecursiveDelete(detail: string): boolean {
   if (!RM_WORD_RE.test(detail)) return false;
-  let recursive = false;
-  let force = false;
   for (const token of detail.split(/\s+/)) {
-    if (LONG_RECURSIVE_RE.test(token)) recursive = true;
-    else if (LONG_FORCE_RE.test(token)) force = true;
-    else if (SHORT_FLAG_RE.test(token)) {
-      if (/r/i.test(token)) recursive = true;
-      if (/f/i.test(token)) force = true;
-    }
+    if (LONG_RECURSIVE_RE.test(token)) return true;
+    if (SHORT_FLAG_RE.test(token) && /r/i.test(token)) return true;
   }
-  return recursive && force;
+  return false;
 }
 
 // git accepts global options *between* `git` and the subcommand (e.g. `git -C /repo push
@@ -162,7 +157,7 @@ const SECRET_SCAN_TOOLS = new Set(["Read", "Bash", "Grep", "Glob", "NotebookRead
 
 export function hardDeny(tool: string, detail: string): boolean {
   if (tool === "Bash") {
-    if (isRmRecursiveForceDelete(detail)) return true;
+    if (isRmRecursiveDelete(detail)) return true;
     if (BASH_DENY_PATTERNS.some((re) => re.test(detail))) return true;
   }
   if (SECRET_SCAN_TOOLS.has(tool) && SECRET_PATH_RE.test(detail)) return true;

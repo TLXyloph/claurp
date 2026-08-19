@@ -12,7 +12,7 @@ beforeEach(() => {
   process.env.CLAURP_HOME = mkdtempSync(join(tmpdir(), "claurp-pol-adv-"));
 });
 
-describe("finding 1: rm recursive+force -- GNU long-form, split flags, case", () => {
+describe("finding 1: rm recursive -- GNU long-form, split flags, case", () => {
   const blocked: Array<[string, string]> = [
     ["Bash", "rm --recursive --force x"],
     ["Bash", "rm -R -f x"],
@@ -29,11 +29,21 @@ describe("finding 1: rm recursive+force -- GNU long-form, split flags, case", ()
   it.each(allowed)("permits %s %s", (t, d) => expect(hardDeny(t, d)).toBe(false));
 });
 
+describe("fix round 2: rm hard-denies on recursive-intent alone, force no longer required", () => {
+  const blocked: Array<[string, string]> = [
+    ["Bash", "rm -r ./build"],
+    ["Bash", "rm -R dir"],
+    ["Bash", "rm --recursive dir"],
+  ];
+  it.each(blocked)("denies %s %s", (t, d) => expect(hardDeny(t, d)).toBe(true));
+});
+
 describe("finding 8: rm force-only (no recursive) is NOT a hard deny", () => {
   const allowed: Array<[string, string]> = [
     ["Bash", "rm -f file.txt"],
     ["Bash", "docker rm -f container"],
     ["Bash", "rm -f build/out.o"],
+    ["Bash", "rm -i file"], // interactive, not recursive -- fix round 2
   ];
   it.each(allowed)("permits %s %s", (t, d) => expect(hardDeny(t, d)).toBe(false));
 });
