@@ -14,7 +14,8 @@ export type RiskClass = "read" | "write" | "exec" | "network";
 const READ_TOOLS = new Set(["Read", "Grep", "Glob", "NotebookRead"]);
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch"]);
-const BASH_NETWORK_RE = /\b(curl|wget|https?:\/\/)/;
+// "i" -- a Bash command's casing (e.g. `CURL https://x`) doesn't change what it does.
+const BASH_NETWORK_RE = /\b(curl|wget|https?:\/\/)/i;
 
 export function classify(tool: string, detail: string): RiskClass {
   if (READ_TOOLS.has(tool)) return "read";
@@ -24,38 +25,147 @@ export function classify(tool: string, detail: string): RiskClass {
   return "exec"; // unknown tools: conservative
 }
 
-// spec §5.4 hard deny-list. Bash-only shell-command patterns:
-const RM_RF_RE = /\brm\s+-[a-z]*[rf][a-z]*[rf]?\b/;
-const GIT_CLEAN_F_RE = /\bgit\s+clean\b.*-[a-z]*f/;
-const GIT_PUSH_FORCE_RE = /\bgit\s+push\b.*(--force|-f\b)/;
-const GIT_HISTORY_REWRITE_RE = /\bgit\s+(reset\s+--hard|rebase|filter-branch)\b/;
-const GIT_CHECKOUT_DISCARD_RE = /\bgit\s+checkout\s+--\s/;
+// ---------------------------------------------------------------------------------------------
+// spec §5.4 hard deny-list.
+//
+// This list is defense-in-depth, not the primary gate: the permission-ASK path (decide()'s
+// "ask" verdicts) is what actually stops an agent from running an arbitrary command -- hardDeny
+// only removes the "always allow" escape hatch for the highest-impact destructive operations
+// and their most common equivalents. It is deliberately not exhaustive coverage of every way to
+// delete/rewrite/discard something in a shell.
+// ---------------------------------------------------------------------------------------------
 
-// Secret-path token, checked for Read and Bash. Boundary-anchored on both sides so it only
-// matches a path-ish token, not an arbitrary substring:
-//  - start: "^", whitespace, or "/" (start of a path segment or shell argument).
-//  - end (for the bare "credentials"/"secrets" words only): a lookahead for "/", ".",
-//    whitespace, or end-of-string -- deliberately NOT a plain "\b". A plain word boundary
-//    already fires at a word-char -> non-word-char transition, and "-" is non-word, so
-//    "secrets\b" would match inside "secrets-policy" (the "s"→"-" transition is itself a
-//    boundary). The doc filename "docs/secrets-policy.md" is exactly this false positive --
-//    it *mentions* "secrets" in a hyphenated compound but isn't a secrets path. Requiring the
-//    character after the word to be a real path/argument separator (not a hyphen) excludes
-//    that compound while still matching real paths like "secrets/api_key" or "credentials.json".
+// rm recursive-force: GNU short (bundled or separate, in either order, any case) and long-form
+// flags. Denies only when BOTH recursive-intent (-r/-R/--recursive) AND force-intent
+// (-f/--force) are present -- force alone (e.g. "rm -f file.txt", "docker rm -f container") is
+// a single-file delete, not the recursive-delete spec §5.4 targets, so it stays ask-able rather
+// than hard-denied.
+//
+// Implemented as a token scan, not a single "search anywhere" regex: an unanchored pattern
+// can't tell an actual "-f"/"-rf" flag token apart from a "-f"/"-rf" substring buried inside an
+// unrelated filename (e.g. "out-file.txt"), so each whitespace-delimited token is matched
+// against a flag pattern anchored to the *whole* token. Splitting on `/\s+/` is newline-safe
+// too (whitespace includes "\n"), so a line-continued command can't dodge this by breaking the
+// flag onto its own line.
+const RM_WORD_RE = /\brm\b/i;
+const SHORT_FLAG_RE = /^-[a-zA-Z]+$/; // e.g. -r, -f, -rf, -Rf, -fr (letters only after the dash)
+const LONG_RECURSIVE_RE = /^--recursive$/i;
+const LONG_FORCE_RE = /^--force$/i;
+
+function isRmRecursiveForceDelete(detail: string): boolean {
+  if (!RM_WORD_RE.test(detail)) return false;
+  let recursive = false;
+  let force = false;
+  for (const token of detail.split(/\s+/)) {
+    if (LONG_RECURSIVE_RE.test(token)) recursive = true;
+    else if (LONG_FORCE_RE.test(token)) force = true;
+    else if (SHORT_FLAG_RE.test(token)) {
+      if (/r/i.test(token)) recursive = true;
+      if (/f/i.test(token)) force = true;
+    }
+  }
+  return recursive && force;
+}
+
+// git accepts global options *between* `git` and the subcommand (e.g. `git -C /repo push
+// --force`, `git -c user.name=x reset --hard`). Every git rule below is prefixed with this so a
+// global-option prefix can't smuggle a dangerous subcommand past a rule anchored to a bare
+// "git <subcommand>". `-C`/`-c` are deliberately kept case-sensitive here -- git itself treats
+// them as two different flags (`-C` = change directory, `-c` = set a config value).
+const GIT_GLOBAL_OPT_SRC = String.raw`(?:-C\s+\S+|-c\s+\S+|--no-pager|--git-dir(?:=|\s+)\S+)`;
+const GIT_PREFIX_SRC = String.raw`\bgit\b(?:\s+${GIT_GLOBAL_OPT_SRC})*\s+`;
+
+// Flag-detection patterns that "bridge" from the subcommand to a flag appearing later in the
+// string use `[\s\S]*` rather than `.*` -- `.` does not cross a newline without the `s` flag,
+// and Bash commands legitimately span multiple lines (shell line continuations), so a plain
+// `.*` bridge is trivially evaded by putting the dangerous flag on its own line. Every such
+// bridge below also requires the flag to be preceded by whitespace and followed by
+// `(?![\w-])` (not `\b`) -- `\b` alone fires on a word-char -> hyphen transition too, which
+// would false-positive on a branch/file name that merely *ends* in the flag's letters (e.g.
+// "-f" hiding inside "hotfix-f", or "-D" inside "feature-Design").
+const GIT_PUSH_FORCE_RE = new RegExp(
+  GIT_PREFIX_SRC + String.raw`push\b[\s\S]*\s(?:--force|-f)(?![\w-])`,
+);
+// Refspec force-push: a leading "+" on the refspec (e.g. `git push origin +main`) forces the
+// push without needing --force/-f at all.
+const GIT_PUSH_REFSPEC_FORCE_RE = new RegExp(GIT_PREFIX_SRC + String.raw`push\b[\s\S]*\s\+\S`);
+// History rewrites. "filter-repo" is filter-branch's modern replacement (spec §5.4
+// "equivalents"). The single trailing `(?![\w-])` (after the whole alternation, not `\b`)
+// stops e.g. "git rebase-todo-checker" or "git reset --hardcore" (not real git, but the same
+// false-positive shape) from matching a verb that's merely a *prefix* of what was typed.
+const GIT_HISTORY_REWRITE_RE = new RegExp(
+  GIT_PREFIX_SRC + String.raw`(?:reset\s+--hard|rebase|filter-branch|filter-repo)(?![\w-])`,
+);
+const GIT_CLEAN_F_RE = new RegExp(GIT_PREFIX_SRC + String.raw`clean\b[\s\S]*-[a-z]*f`);
+// Discarding changes: `checkout -- <path>`, and `checkout --force`/`checkout -f` (same discard,
+// no pathspec needed). No bridging here (the flag must be the token immediately after
+// "checkout") so `git checkout -b new-branch` / `git checkout feature-branch` are unaffected.
+const GIT_CHECKOUT_DISCARD_RE = new RegExp(
+  GIT_PREFIX_SRC + String.raw`checkout\s+(?:--\s|--force\b|-f\b)`,
+);
+// Force-deleting a branch.
+const GIT_BRANCH_FORCE_DELETE_RE = new RegExp(
+  GIT_PREFIX_SRC + String.raw`branch\b[\s\S]*\s-D(?![\w-])`,
+);
+// `restore` with any real argument (a pathspec, or flags like --staged/--worktree) discards
+// working-tree/index changes the same way `checkout --` does; `git restore --help` must not
+// trip this.
+const GIT_RESTORE_DISCARD_RE = new RegExp(
+  GIT_PREFIX_SRC + String.raw`restore\b(?!\s*(?:--help|-h)\b)\s+\S`,
+);
+const GIT_REFLOG_EXPIRE_RE = new RegExp(GIT_PREFIX_SRC + String.raw`reflog\s+expire\b`);
+const GIT_UPDATE_REF_DELETE_RE = new RegExp(
+  GIT_PREFIX_SRC + String.raw`update-ref\b[\s\S]*\s-d(?![\w-])`,
+);
+
+// `find`-based deletes: a recursive-delete escape hatch around `rm` itself (spec §5.4 "and
+// their equivalents"). Bash-only, like every rule above.
+const FIND_DELETE_RE = /\bfind\b[\s\S]*\s-delete(?![\w-])/;
+const FIND_EXEC_RM_RE = /\bfind\b[\s\S]*\s-exec\s+rm(?![\w-])/;
+
+const BASH_DENY_PATTERNS: RegExp[] = [
+  GIT_CLEAN_F_RE,
+  GIT_PUSH_FORCE_RE,
+  GIT_PUSH_REFSPEC_FORCE_RE,
+  GIT_HISTORY_REWRITE_RE,
+  GIT_CHECKOUT_DISCARD_RE,
+  GIT_BRANCH_FORCE_DELETE_RE,
+  GIT_RESTORE_DISCARD_RE,
+  GIT_REFLOG_EXPIRE_RE,
+  GIT_UPDATE_REF_DELETE_RE,
+  FIND_DELETE_RE,
+  FIND_EXEC_RM_RE,
+];
+
+// Secret-path token, checked for every tool that can surface file *contents* (Read, Bash, Grep,
+// Glob, NotebookRead -- not Write/Edit, which don't read anything back to the caller).
+// Boundary-anchored on both sides via lookaround (not consumed, so nothing needs to be captured
+// or re-matched) so it only matches an isolated path-ish token, never a substring fused to a
+// larger identifier:
+//  - start: `(?<![\w-])` -- not immediately preceded by a word char or hyphen. This is
+//    deliberately broader than "whitespace or /": a shell-quoted or punctuated argument like
+//    `cat 'credentials'`, `echo credentials:`, or `cat (credentials)` has a quote/colon/paren
+//    immediately before the word, not whitespace or a slash, and must still match.
+//  - end (bare "credentials"/"secrets" words only): `(?![\w-])` -- not immediately followed by
+//    a word char or hyphen. A plain word-boundary `\b` would *also* fire on a hyphen (it's a
+//    non-word char too), so "secrets\b" matches inside "secrets-policy" -- the false positive
+//    on the doc filename "docs/secrets-policy.md" (mentions "secrets" in a hyphenated compound,
+//    isn't a secrets path). Excluding hyphen specifically (while still allowing quote / colon /
+//    comma / paren / slash / dot / whitespace / end-of-string as valid terminators) keeps that
+//    doc name out while still matching "secrets/api_key", "credentials.json",
+//    "echo credentials:", etc.
 //  - the extension-based alternatives (.env, .pem, .key, id_rsa/id_ed25519) are already
-//    self-bounded by their literal suffix, so they don't need the same lookahead.
+//    self-bounded by their literal suffix, so they don't need the end lookahead too.
 const SECRET_PATH_RE =
-  /(^|[\s/])(\.env(\.[\w-]+)?|id_(rsa|ed25519)|[\w-]+\.pem|[\w-]+\.key|credentials?(?=[/.\s]|$)|secrets?(?=[/.\s]|$))/i;
+  /(?<![\w-])(?:\.env(?:\.[\w-]+)?|id_(?:rsa|ed25519)|[\w-]+\.pem|[\w-]+\.key|credentials?(?![\w-])|secrets?(?![\w-]))/i;
+const SECRET_SCAN_TOOLS = new Set(["Read", "Bash", "Grep", "Glob", "NotebookRead"]);
 
 export function hardDeny(tool: string, detail: string): boolean {
   if (tool === "Bash") {
-    if (RM_RF_RE.test(detail)) return true;
-    if (GIT_CLEAN_F_RE.test(detail)) return true;
-    if (GIT_PUSH_FORCE_RE.test(detail)) return true;
-    if (GIT_HISTORY_REWRITE_RE.test(detail)) return true;
-    if (GIT_CHECKOUT_DISCARD_RE.test(detail)) return true;
+    if (isRmRecursiveForceDelete(detail)) return true;
+    if (BASH_DENY_PATTERNS.some((re) => re.test(detail))) return true;
   }
-  if ((tool === "Read" || tool === "Bash") && SECRET_PATH_RE.test(detail)) return true;
+  if (SECRET_SCAN_TOOLS.has(tool) && SECRET_PATH_RE.test(detail)) return true;
   return false;
 }
 
