@@ -11,14 +11,19 @@
 // every constant and step below follows it exactly (400-point FFT, hop 160, 80 Slaney-scale
 // mel filters, log10 with an 8-decade floor below the peak, final (x+4)/4 rescale).
 //
-// FFT approach: rather than zero-padding each 400-sample frame to 512 and running a radix-2
-// FFT, this precomputes exact 400-point real-DFT twiddles (restricted to the 201 bins rfft
-// needs) and does a direct sum per frame. Zero-padding to 512 would NOT reproduce the
-// reference's 400-point rfft — it samples a different frequency grid (bins every 16000/512 =
-// 31.25 Hz, 257 of them) than the reference's 201 bins spaced 16000/400 = 40 Hz apart, which
-// the mel filterbank below is built to match exactly. An exact (if O(N^2)-per-frame) DFT was
-// chosen over a numerically-different approximation; measured wall-clock cost for a full 8s
-// window is recorded in task-6-report.md.
+// FFT approach: this precomputes exact 400-point real-DFT twiddles (restricted to the 201 bins
+// rfft needs) and does a direct O(N^2)-per-frame sum. Zero-padding each 400-sample frame to 512
+// and running a radix-2 FFT was rejected: it would NOT reproduce the reference's 400-point
+// rfft — it samples a different frequency grid (bins every 16000/512 = 31.25 Hz, 257 of them)
+// than the reference's 201 bins spaced 16000/400 = 40 Hz apart, which the mel filterbank below
+// is built to match exactly. That is not the only way to get an *exact* result, though: 400 =
+// 2^4 x 5^2 factors cleanly for an O(N log N) mixed-radix Cooley-Tukey FFT, and Bluestein's
+// algorithm (chirp-z transform via convolution) computes an exact DFT for any N. Either would
+// have been correct; the direct O(N^2) sum was chosen instead purely for implementation
+// simplicity — no butterfly/bit-reversal/chirp-sequence logic to get subtly wrong — at an
+// acceptable measured cost (~90-100ms per 8s window, off any per-frame-realtime hot path; see
+// task-6-report.md). Worth revisiting (e.g. a real mixed-radix FFT) if this becomes a
+// bottleneck for the real call pattern.
 
 const SAMPLING_RATE = 16000;
 const N_FFT = 400;

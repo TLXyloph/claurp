@@ -36,18 +36,29 @@ const WINDOW = 8 * 16000;
 // trailing near-silence down to at most 200ms before the 8s window is built, which matches how
 // pipecat's own production analyzer behaves in practice (it feeds audio ending near the pause
 // onset, not with a long fixed silence tail baked in). "Sub-energy" = any 20ms frame whose peak
-// amplitude is below 2% of the whole clip's peak amplitude -- a simple, dependency-free trim,
-// not a full VAD; scan backward from the end to find the last frame above that floor, then keep
-// at most TRIM_TAIL_MS beyond it.
-const TRIM_TAIL_MS = 200;
+// amplitude is below 2% of a *recent* reference peak (see below) -- a simple, dependency-free
+// trim, not a full VAD; scan backward from the end to find the last frame above that floor, then
+// keep at most TRIM_TAIL_MS beyond it.
+export const TRIM_TAIL_MS = 200;
 const TRIM_FRAME_MS = 20;
 const TRIM_ENERGY_RATIO = 0.02;
 
-function trimTrailingSilence(pcm: Float32Array, maxTailMs: number, sampleRate = 16000): Float32Array {
+// Exported for direct unit testing (test/audio/trim.test.ts) -- this is pure DSP with no ONNX
+// model involved, so it doesn't need to live behind describe.skipIf(!haveModel) to be tested.
+export function trimTrailingSilence(pcm: Float32Array, maxTailMs: number, sampleRate = 16000): Float32Array {
   const maxTailSamples = Math.round((maxTailMs / 1000) * sampleRate);
   const frameSize = Math.round((TRIM_FRAME_MS / 1000) * sampleRate);
+  // Reference peak is scoped to the trailing WINDOW (8s) only, NOT the whole `pcm` array.
+  // Callers pass "the utterance so far," which is unbounded -- a loud moment anywhere earlier
+  // in a long-running buffer would otherwise set a peak (and therefore a threshold) that
+  // quiet-but-genuinely-voiced *recent* speech falls under, causing the backward scan below to
+  // misidentify the newest audio as "sub-energy" and trim it away. Everything outside the
+  // trailing WINDOW gets discarded by the windowing step right after this function returns
+  // anyway, so scoping the peak to that same region is also the semantically-relevant range,
+  // not merely a workaround (fixed post-review; see task-6-report.md fix-round addendum).
+  const recentStart = Math.max(0, pcm.length - WINDOW);
   let peak = 0;
-  for (let i = 0; i < pcm.length; i++) {
+  for (let i = recentStart; i < pcm.length; i++) {
     const a = Math.abs(pcm[i]);
     if (a > peak) peak = a;
   }
