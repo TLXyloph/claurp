@@ -21,9 +21,10 @@ type State = "idle" | "listening";
 // Frame-count constants (512 samples @ 16 kHz = 32 ms/frame — see task-7-brief.md's behavior
 // table for the derivations; ms figures below are approximate).
 const HANGOVER_FRAMES = 15; // ~480ms: keep feeding the wake spotter this long past the last speech frame
+const PRE_ROLL_FRAMES = 15; // leading context (KWS warm-up) before speech starts — distinct from HANGOVER_FRAMES' trailing context after it ends, even though currently equal
 const PARTIAL_EVERY_FRAMES = 25; // ~800ms cadence between partial transcriptions
 const PARTIAL_MIN_BUFFER_FRAMES = 38; // ~1.2s minimum buffered before the first partial
-const TURN_CHECK_FRAMES = 13; // ~400ms trailing quiet before consulting the turn detector
+const TURN_CHECK_FRAMES = 13; // ~400ms trailing-quiet polling interval for the turn detector
 const SILENCE_FALLBACK_FRAMES = 78; // ~2.5s trailing quiet: finalize regardless of the turn detector
 const HARD_CUTOFF_FRAMES = 3750; // ~120s listening: hard finalize safety valve
 
@@ -42,9 +43,10 @@ export class AudioPipeline {
   private framesSincePartial = 0;
   private trailingQuiet = 0;
   private idleHangover = 0;
-  // Rolling pre-speech lookback, flushed to the wake spotter the moment feeding resumes after
-  // a quiet stretch — see task-7-report.md ("wake spotter needs pre-speech context"): the real
-  // spotter reliably misses a keyword that leads its very first fed frame with no lead-in.
+  // Rolling pre-speech lookback (capped at PRE_ROLL_FRAMES), flushed to the wake spotter the
+  // moment feeding resumes after a quiet stretch — see task-7-report.md ("wake spotter needs
+  // pre-speech context"): the real spotter reliably misses a keyword that leads its very first
+  // fed frame with no lead-in.
   private preRoll: Float32Array[] = [];
   private wasFeedingWake = false;
   private queue: Promise<void> = Promise.resolve();
@@ -64,7 +66,10 @@ export class AudioPipeline {
     return this.queue;
   }
 
-  // Synchronous by interface (no frame in flight to serialize against) — a no-op unless idle.
+  // Synchronous by the frozen interface (void, not Promise<void>) — cannot be routed through
+  // `queue` like feed()/pttUp(), so it mutates state immediately instead. Safe under the
+  // current single-caller usage; must be revisited when a live PTT handler runs concurrently
+  // with streaming feed() (it could then interleave with an in-flight, mid-await process()).
   pttDown(): void {
     if (this.state !== "idle") return;
     this.state = "listening";
@@ -94,7 +99,7 @@ export class AudioPipeline {
     if (!feedWake) {
       this.wasFeedingWake = false;
       this.preRoll.push(f32);
-      if (this.preRoll.length > HANGOVER_FRAMES) this.preRoll.shift();
+      if (this.preRoll.length > PRE_ROLL_FRAMES) this.preRoll.shift();
       return;
     }
 
@@ -138,9 +143,12 @@ export class AudioPipeline {
       }
     }
 
-    // Single consult right as the trailing quiet run crosses the minimum-pause floor (not a
-    // repeated per-frame poll all the way to the fallback — see task-7-report.md).
-    if (this.trailingQuiet === TURN_CHECK_FRAMES) {
+    // Poll every TURN_CHECK_FRAMES (13, 26, 39, ...), not a single consult at frame 13 —
+    // controller ruling, fix round (task-7-report.md addendum): a single miss at 13 would leave
+    // up to (78-13)*32ms ≈ 2.1s of dead air before the 78-frame fallback. Measured real
+    // isComplete() cost: ~72ms/call (mean of 10, this machine) — cheap against the ~416ms poll
+    // interval. 78 is itself a multiple of 13, so the last poll and the fallback can coincide.
+    if (this.trailingQuiet > 0 && this.trailingQuiet % TURN_CHECK_FRAMES === 0) {
       const pcm = int16ToFloat32(concatInt16(this.buffer));
       if (await this.turn.isComplete(pcm)) {
         await this.finalize();
