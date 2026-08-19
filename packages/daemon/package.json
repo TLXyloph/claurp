@@ -2,7 +2,9 @@
   "name": "@claurp/daemon",
   "version": "0.1.0",
   "type": "module",
-  "bin": { "claurp-daemon": "dist/cli.js" },
+  "bin": {
+    "claurp-daemon": "dist/cli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
@@ -11,6 +13,7 @@
     "models": "tsx tools/fetch-models.ts"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.235",
     "@claurp/protocol": "workspace:*",
     "onnxruntime-node": "^1.19.2",
     "sherpa-onnx-node": "^1.12.0",
@@ -18,11 +21,11 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "typescript": "^5.5.4",
-    "vitest": "^2.1.1",
-    "tsx": "^4.19.0",
-    "@types/ws": "^8.5.12",
     "@types/node": "^20.14.0",
-    "kokoro-js": "^1.2.1"
+    "@types/ws": "^8.5.12",
+    "kokoro-js": "^1.2.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
   }
 }
