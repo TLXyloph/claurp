@@ -3,7 +3,6 @@
 // (T11), MeterService (T13), Narrator (T14), and TTS (T15) into one WebSocket server. The
 // dispatch-contract table in task-16-brief.md is the spec this file (plus server-dispatch.ts)
 // implements exactly.
-import { execFile } from "node:child_process";
 import type { AgentAdapter, AgentEvent, DaemonToSensesMsg, SensesToDaemonMsg } from "@claurp/protocol";
 import {
   BIN_MIC_PCM16_16K,
@@ -25,6 +24,7 @@ import { SessionManager, type SessionRecord } from "./sessions/manager.js";
 import type { Project } from "./sessions/projects.js";
 import { SentenceSplitter } from "./tts/sentences.js";
 import type { TtsEngine } from "./tts/kokoro.js";
+import { runHandoffTerminal, toBuffer } from "./server-util.js";
 
 export interface PipelineLike {
   feed(f: Int16Array): Promise<void>;
@@ -50,32 +50,6 @@ const DAEMON_VERSION = "0.1.0";
 const FRAME_SAMPLES = 512; // 32ms @ 16kHz, matches AudioPipeline's frame size (T7)
 const WATCHDOG_INTERVAL_MS = 5000;
 const WATCHDOG_MAX_MISSED = 3;
-
-function toBuffer(data: RawData): Buffer {
-  if (Buffer.isBuffer(data)) return data;
-  if (Array.isArray(data)) return Buffer.concat(data);
-  return Buffer.from(data);
-}
-
-/** Embeds `cmd` in an AppleScript double-quoted string literal safely (escapes backslashes and
- *  quotes). Used instead of a hand-built shell string -- see runHandoffTerminal(). */
-function escapeAppleScriptString(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-/** spec §5.3 handoff: opens Terminal.app and runs `cmd` there via AppleScript. Uses execFile
- *  (argv, no shell) rather than a shell string, so `cmd` never needs shell quoting at all --
- *  only the AppleScript string-literal escaping above is needed. */
-function runHandoffTerminal(cmd: string): void {
-  const escaped = escapeAppleScriptString(cmd);
-  execFile(
-    "osascript",
-    ["-e", `tell application "Terminal" to do script "${escaped}"`, "-e", 'tell application "Terminal" to activate'],
-    (err) => {
-      if (err) console.warn(`claurp: failed to open Terminal for handoff: ${err.message}`);
-    },
-  );
-}
 
 export class DaemonServer {
   private readonly manager: SessionManager;
@@ -316,33 +290,72 @@ export class DaemonServer {
 
   // ---- session event pump (spec dispatch table #4) ---------------------------------------
 
+  // Review fix (Important): the whole loop body is wrapped so an iterator REJECTION (e.g. a
+  // real adapter's transport dying mid-stream, as opposed to an in-band {kind:"error"} event)
+  // is handled exactly like a session error instead of becoming an unhandled rejection that
+  // could take the whole daemon down and skip cleanup. meter.persist()/recomputeGlobalState()
+  // run in `finally` so they happen on every exit path (normal completion OR failure).
   private async pumpSession(record: SessionRecord): Promise<void> {
-    for await (const e of record.handle.events()) {
-      let verdict: Verdict | null = null;
-      if (e.kind === "needs-permission") {
-        verdict = this.deps.policy.decide(e.tool, e.detail);
-        if (verdict.action === "ask") this.lastNarration.set(record.id, this.deps.narrator.permissionAsk(e.tool, e.detail));
-      } else {
-        const line = this.deps.narrator.onEvent(record.label, e);
-        if (line !== null) this.lastNarration.set(record.id, line);
-      }
+    try {
+      for await (const e of record.handle.events()) {
+        let verdict: Verdict | null = null;
+        if (e.kind === "needs-permission") {
+          verdict = this.deps.policy.decide(e.tool, e.detail);
+          if (verdict.action === "ask") this.lastNarration.set(record.id, this.deps.narrator.permissionAsk(e.tool, e.detail));
+        } else {
+          const line = this.deps.narrator.onEvent(record.label, e);
+          if (line !== null) this.lastNarration.set(record.id, line);
+        }
 
-      this.manager.noteActivity(record.id);
-      this.manager.consume(record.id, e); // triggers onSessionChange -> hud.session (uses lastNarration above)
+        this.manager.noteActivity(record.id);
+        this.manager.consume(record.id, e); // triggers onSessionChange -> hud.session (uses lastNarration above)
 
-      if (e.kind === "usage-metadata") {
-        this.deps.meter.record(record.id, e);
-      } else if (e.kind === "needs-permission" && verdict) {
-        this.handleNeedsPermission(record, e, verdict);
-      } else if (e.kind === "done") {
-        this.handleSessionDone(record, e);
-      } else if (e.kind === "error") {
-        this.broadcast({ v: PROTOCOL_VERSION, type: "notify", title: `${record.label} error`, body: e.message, sessionId: record.id, actions: [] });
-        this.speak(this.deps.narrator.onEvent(record.label, e));
+        if (e.kind === "usage-metadata") {
+          this.deps.meter.record(record.id, e);
+        } else if (e.kind === "needs-permission" && verdict) {
+          this.handleNeedsPermission(record, e, verdict);
+        } else if (e.kind === "done") {
+          this.handleSessionDone(record, e);
+        } else if (e.kind === "error") {
+          this.applySessionError(record, e);
+        }
       }
+    } catch (err) {
+      this.handlePumpFailure(record, err);
+    } finally {
+      this.deps.meter.persist();
+      this.recomputeGlobalState();
     }
-    this.deps.meter.persist();
-    this.recomputeGlobalState();
+  }
+
+  /** Iterator rejection (transport death, etc.) mid-`for await`, caught by pumpSession()'s
+   *  try/catch above. Treated identically to an in-band `{kind:"error"}` event: mark the
+   *  session failed through the normal manager.consume() path (so hud.session/state follow
+   *  the same rules an adapter-emitted error would), then notify + speak. Never rethrows --
+   *  this is the last line of defense before an unhandled rejection would otherwise escape. */
+  private handlePumpFailure(record: SessionRecord, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`claurp: session ${record.id}'s event stream failed`, err);
+    const errorEvent: Extract<AgentEvent, { kind: "error" }> = { kind: "error", message };
+
+    const line = this.deps.narrator.onEvent(record.label, errorEvent);
+    if (line !== null) this.lastNarration.set(record.id, line);
+    this.manager.noteActivity(record.id);
+    this.manager.consume(record.id, errorEvent); // drives state -> "failed", triggers hud.session
+
+    this.applySessionError(record, errorEvent);
+  }
+
+  private applySessionError(record: SessionRecord, e: Extract<AgentEvent, { kind: "error" }>): void {
+    this.broadcast({
+      v: PROTOCOL_VERSION,
+      type: "notify",
+      title: `${record.label} error`,
+      body: e.message,
+      sessionId: record.id,
+      actions: [],
+    });
+    this.speak(this.deps.narrator.onEvent(record.label, e));
   }
 
   private handleNeedsPermission(

@@ -9,6 +9,14 @@ interface CliArgs {
   adapter: string;
 }
 
+// Review fix (Important): last-resort backstop. DaemonServer's own session pump (server.ts)
+// now catches iterator rejections itself, but this covers anything else in the process that
+// might still reject unhandled -- one bad promise anywhere should never take the whole daemon
+// down. Deliberately does NOT exit; just logs, so the daemon stays up for every other session.
+process.on("unhandledRejection", (reason) => {
+  console.error("claurp-daemon: unhandled rejection (daemon staying up):", reason);
+});
+
 function parseArgs(argv: string[]): CliArgs {
   let port = 8765;
   let adapter = "claude";

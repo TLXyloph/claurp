@@ -7,8 +7,8 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentAdapter } from "@claurp/protocol";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AdapterCapabilities, AgentAdapter, AgentEvent, SessionHandle, SpawnOpts } from "@claurp/protocol";
 import { BIN_TTS_PCM16_24K, PROTOCOL_VERSION, decodeBinaryFrame } from "@claurp/protocol";
 import { WebSocket } from "ws";
 import { FakeAgent } from "../src/agents/fake.js";
@@ -33,6 +33,45 @@ function stubTts(): TtsEngine {
       // no-op: the abort itself is driven by DaemonServer's own ttsAbortToken, not by this stub.
     },
   };
+}
+
+const THROWING_CAPABILITIES: AdapterCapabilities = {
+  images: false,
+  permissions: "callback",
+  resume: false,
+  queuedInput: true,
+  permissionModes: ["default", "acceptEdits", "plan", "bypassPermissions"],
+};
+
+// Regression fixture for the pump-error-isolation fix: an adapter whose events() async
+// iterator REJECTS mid-stream (a transport dying), as opposed to emitting an in-band
+// {kind:"error"} event. Before the fix this was an unhandled rejection out of pumpSession()'s
+// un-try/caught `for await`.
+class ThrowingAgent implements AgentAdapter {
+  readonly name = "throwing";
+
+  capabilities(): AdapterCapabilities {
+    return THROWING_CAPABILITIES;
+  }
+
+  spawn(_opts: SpawnOpts): SessionHandle {
+    return {
+      send: () => {},
+      interrupt: () => {},
+      setPermissionMode: () => {},
+      respondPermission: () => {},
+      events(): AsyncIterable<AgentEvent> {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield { kind: "started", backendSessionId: null };
+            throw new Error("transport died");
+          },
+        };
+      },
+      handoffCommand: () => null,
+      kill: () => {},
+    };
+  }
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
@@ -163,5 +202,89 @@ describe("DaemonServer", () => {
     onEvent({ kind: "final", text: "usage" }); // starts a new speak(); stub takes ~30ms to yield
     onEvent({ kind: "wake" }); // fires essentially immediately after, while that speak is in flight
     await waitFor(() => countWhere((m) => m.type === "speak.stop") > speakStopBefore);
+  });
+});
+
+describe("DaemonServer session-pump error isolation (review fix round)", () => {
+  it("marks the session failed when its event stream rejects mid-iteration, without crashing or skipping persist", async () => {
+    process.env.CLAURP_HOME = mkdtempSync(join(tmpdir(), "claurp-server-pump-error-"));
+
+    // Proves nothing escapes as a genuine unhandled rejection -- not just "the test didn't hang."
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandledRejection);
+
+    const project = { name: "demo", cwd: process.cwd() };
+    const adapters = new Map<string, AgentAdapter>([["throwing", new ThrowingAgent()]]);
+    const meter = new MeterService();
+    const persistSpy = vi.spyOn(meter, "persist");
+
+    let onEvent!: (e: PipelineEvent) => void;
+    const deps: DaemonDeps = {
+      pipelineFactory: async (cb) => {
+        onEvent = cb;
+        const stub: PipelineLike = { feed: async () => {}, pttDown: () => {}, pttUp: async () => {} };
+        return stub;
+      },
+      adapters,
+      defaultAdapter: "throwing",
+      projects: { defaultProject: project, byName: new Map([["demo", project]]) },
+      policy: new PermissionPolicy(),
+      meter,
+      narrator: new Narrator(),
+      tts: stubTts(),
+    };
+
+    const server = new DaemonServer(deps, { port: 0 });
+    const port = await server.start();
+
+    const messages: Msg[] = [];
+    let ttsFrames = 0;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+        const { type } = decodeBinaryFrame(buf);
+        if (type === BIN_TTS_PCM16_24K) ttsFrames++;
+        return;
+      }
+      messages.push(JSON.parse(data.toString()) as Msg);
+    });
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+
+    try {
+      ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: "hello", client: "test", protocol: PROTOCOL_VERSION }));
+      await waitFor(() => messages.some((m) => m.type === "hello.ack"));
+
+      // Spawns a session on the "throwing" adapter: its events() yields one "started" event,
+      // then the async iterator itself rejects on the next pull -- the exact "transport died
+      // mid-stream" scenario, not an in-band {kind:"error"} event.
+      onEvent({ kind: "final", text: "do something" });
+
+      await waitFor(() => messages.some((m) => m.type === "hud.session" && m.state === "working"));
+      await waitFor(() => messages.some((m) => m.type === "hud.session" && m.state === "failed"));
+      await waitFor(() =>
+        messages.some((m) => m.type === "notify" && typeof m.title === "string" && (m.title as string).includes("error")),
+      );
+      await waitFor(() => persistSpy.mock.calls.length > 0);
+
+      // Server stays up: a completely unrelated intent afterward still gets a normal response.
+      const ttsBefore = ttsFrames;
+      onEvent({ kind: "final", text: "usage" });
+      await waitFor(() => ttsFrames > ttsBefore);
+
+      // Give any straggler microtask a chance to surface before asserting "nothing escaped".
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+      ws.close();
+      await server.stop();
+    }
   });
 });

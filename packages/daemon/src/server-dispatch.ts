@@ -65,6 +65,16 @@ function resolveNamedProject(ctx: DispatchContext, name: string): Project | null
   return ctx.projects.byName.get(name) ?? null;
 }
 
+/** Fix round (Minor): a session doesn't stop being voice-immutable just because it finished
+ *  normally -- one that's been handed off to a terminal (spec §5.3) is now driven from there,
+ *  so `mode`/`handoff` voice commands must refuse it exactly like a done/failed one. Returns
+ *  the honest refusal to speak, or `null` if the session is still voice-mutable. */
+function voiceImmutableRefusal(record: SessionRecord): string | null {
+  if (record.state === "done" || record.state === "failed") return `${record.label} already finished.`;
+  if (record.state === "handed-off") return `${record.label} is in your terminal now.`;
+  return null;
+}
+
 /** Resolves the project for `prompt`/`session-new` intents. Returns `null` (having already
  *  spoken the honest "no such project" refusal) when a named project doesn't exist. */
 function resolveProjectOrRefuse(ctx: DispatchContext, name: string | undefined): Project | null {
@@ -126,8 +136,9 @@ function dispatchSession(intent: Extract<Intent, { kind: "session" }>, ctx: Disp
         return;
       }
       // Carry-forward: handoff() has NO terminal guard -- check state ourselves first.
-      if (focused.state === "done" || focused.state === "failed") {
-        ctx.speak(`${focused.label} already finished.`);
+      const refusal = voiceImmutableRefusal(focused);
+      if (refusal) {
+        ctx.speak(refusal);
         return;
       }
       const cmd = ctx.manager.handoff(focused.id);
@@ -158,8 +169,9 @@ function dispatchMode(intent: Extract<Intent, { kind: "mode" }>, ctx: DispatchCo
     return;
   }
   // Carry-forward: setPermissionMode() has NO terminal guard -- check state ourselves first.
-  if (focused.state === "done" || focused.state === "failed") {
-    ctx.speak(`${focused.label} already finished.`);
+  const refusal = voiceImmutableRefusal(focused);
+  if (refusal) {
+    ctx.speak(refusal);
     return;
   }
   ctx.manager.setPermissionMode(focused.id, intent.mode);
