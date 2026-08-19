@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. rapid PR pushes).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint · build · test
+    runs-on: ubuntu-latest
+    env:
+      # The real Kokoro TTS test downloads a ~90MB model and spawns a worker;
+      # skip it in CI. All model-dependent audio tests (VAD/wake/STT/turn/e2e)
+      # self-skip via existsSync(model) since CI installs no models.
+      CLAURP_SKIP_TTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Build first: the daemon resolves @claurp/protocol from its built
+      # dist/*.d.ts, so protocol must be compiled before lint/test can
+      # typecheck or import it. pnpm -r builds in topological order.
+      - name: Build (tsc)
+        run: pnpm -r build
+
+      - name: Lint (tsc --noEmit)
+        run: pnpm -r lint
+
+      - name: Test
+        run: pnpm -r test

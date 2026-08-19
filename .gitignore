@@ -6,3 +6,4 @@ build/
 .env.*
 *.log
 .claurp/
+demo-out.wav
