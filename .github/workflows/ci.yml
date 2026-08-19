@@ -37,11 +37,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Lint (tsc --noEmit)
-        run: pnpm -r lint
-
+      # Build first: the daemon resolves @claurp/protocol from its built
+      # dist/*.d.ts, so protocol must be compiled before lint/test can
+      # typecheck or import it. pnpm -r builds in topological order.
       - name: Build (tsc)
         run: pnpm -r build
+
+      - name: Lint (tsc --noEmit)
+        run: pnpm -r lint
 
       - name: Test
         run: pnpm -r test
