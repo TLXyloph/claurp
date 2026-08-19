@@ -115,6 +115,8 @@ export class SessionManager {
   consume(id: string, e: AgentEvent): void {
     const record = this.records.get(id);
     if (!record) return;
+    // Terminal is terminal: once "done"/"failed", later events (e.g. drained after kill()) are ignored.
+    if (record.state === "done" || record.state === "failed") return;
 
     switch (e.kind) {
       case "started":
@@ -146,11 +148,14 @@ export class SessionManager {
   respondPermission(id: string, decision: "allow" | "deny"): void {
     const record = this.records.get(id);
     if (!record) return;
-
+    // Terminal sessions cannot be resurrected by a late permission response.
+    if (record.state === "done" || record.state === "failed") return;
     const pending = record.pendingPermission;
+    if (!pending) return; // no ask outstanding -- complete no-op: no state change/touch/forward/emit
+
     record.pendingPermission = null;
     record.state = "working";
-    if (pending) record.handle.respondPermission(pending.requestId, decision);
+    record.handle.respondPermission(pending.requestId, decision);
     this.touch(id);
     this.emitChange(record);
   }
@@ -166,7 +171,12 @@ export class SessionManager {
   kill(id: string): void {
     const record = this.records.get(id);
     if (!record) return;
+    // A user-requested stop is a completed lifecycle, not a failure -- the state enum has no
+    // "killed", so kill() lands on "done" (terminal; see consume()'s and respondPermission()'s guards).
+    record.state = "done";
+    record.pendingPermission = null;
     record.handle.kill();
+    this.touch(id);
     this.emitChange(record);
   }
 
