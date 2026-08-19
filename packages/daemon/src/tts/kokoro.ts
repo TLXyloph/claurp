@@ -101,15 +101,19 @@ function createChannel<T>() {
 // hook keeps the worker in the single process fork() actually creates, so the
 // advanced-serialization channel it establishes reaches the real worker code
 // directly — confirmed via the same repro (Int16Array survives intact).
-function resolveWorkerEntry(): { workerSrc: string; cwd: string } {
+// `override`, if given, replaces the real kokoro-worker.ts entirely — this is
+// the test seam: a test can point this at a tiny fake worker script (same IPC
+// protocol, no real model/kokoro-js/onnxruntime) so stop()/abort behavior can
+// be regression-tested in milliseconds instead of through the slow real model.
+function resolveWorkerEntry(override?: string): { workerSrc: string; cwd: string } {
   const require = createRequire(import.meta.url);
   const pkgRoot = dirname(require.resolve("../../package.json"));
-  const workerSrc = join(pkgRoot, "src", "tts", "kokoro-worker.ts");
+  const workerSrc = override ?? join(pkgRoot, "src", "tts", "kokoro-worker.ts");
   return { workerSrc, cwd: pkgRoot };
 }
 
-function spawnWorker(): ChildProcess {
-  const { workerSrc, cwd } = resolveWorkerEntry();
+function spawnWorker(workerEntry?: string): ChildProcess {
+  const { workerSrc, cwd } = resolveWorkerEntry(workerEntry);
   return fork(workerSrc, [], {
     cwd,
     execArgv: ["--import", "tsx"], // registers tsx's TS-loader hook in this same process, no nested spawn
@@ -126,6 +130,10 @@ function waitForReady(child: ChildProcess): Promise<void> {
         resolve();
       } else if (msg.type === "fatal") {
         cleanup();
+        // A worker that failed init (e.g. model load threw) still holds its
+        // IPC channel open — that's an active handle, so the process would
+        // otherwise sit resident forever rather than exiting on its own.
+        child.kill("SIGTERM");
         reject(new Error(`kokoro worker failed to initialize: ${msg.message}`));
       }
     };
@@ -135,6 +143,7 @@ function waitForReady(child: ChildProcess): Promise<void> {
     };
     const onError = (err: Error): void => {
       cleanup();
+      child.kill("SIGTERM"); // best-effort: the process may still be alive despite the channel erroring
       reject(err);
     };
     function cleanup(): void {
@@ -148,14 +157,45 @@ function waitForReady(child: ChildProcess): Promise<void> {
   });
 }
 
-export async function createKokoroTts(opts: { voice?: string } = {}): Promise<TtsEngine> {
+// `dispose()` is deliberately not part of the frozen `TtsEngine` interface —
+// it's an extra capability the concrete Kokoro handle exposes so a long-lived
+// owner (the daemon's shutdown path) can tear the worker process down
+// cleanly. Anything typed as plain `TtsEngine` still works unchanged.
+export interface KokoroTtsHandle extends TtsEngine {
+  dispose(): void; // kill the worker child and fail any in-flight synthesize() calls. Idempotent.
+}
+
+export async function createKokoroTts(opts: { voice?: string; workerEntry?: string } = {}): Promise<KokoroTtsHandle> {
   const voice = opts.voice ?? "af_heart";
-  const child = spawnWorker();
-  await waitForReady(child);
+  const child = spawnWorker(opts.workerEntry);
 
   let nextId = 1;
   let activeId: number | null = null;
+  let disposed = false;
   const activeChannels = new Map<number, ReturnType<typeof createChannel<Int16Array>>>();
+
+  function failAllActive(err: unknown): void {
+    for (const chan of activeChannels.values()) chan.finish(err);
+    activeChannels.clear();
+  }
+
+  // Attached for the child's ENTIRE lifetime (spawn through dispose), not
+  // just during waitForReady()'s init window. An EventEmitter with no
+  // "error" listener at all THROWS on an 'error' event, which crashes the
+  // whole daemon process — not just TTS. packages/daemon/src/audio/
+  // transcriber.ts has the identical fix for the same reason. This also
+  // covers errors that happen mid-synthesis (broken pipe, send() failure):
+  // fails any in-flight synthesize() calls with a clear error instead of
+  // leaving them hanging or letting the error escape unhandled.
+  child.on("error", (err) => {
+    failAllActive(err);
+  });
+  child.on("exit", (code) => {
+    if (disposed) return; // expected — dispose() killed it
+    failAllActive(new Error(`kokoro worker exited unexpectedly (code ${code})`));
+  });
+
+  await waitForReady(child);
 
   const onMessage = (msg: WorkerToParent): void => {
     if (msg.type === "ready" || msg.type === "fatal") return; // init-phase only, already handled
@@ -166,12 +206,9 @@ export async function createKokoroTts(opts: { voice?: string } = {}): Promise<Tt
     else if (msg.type === "error") chan.finish(new Error(msg.message));
   };
   child.on("message", onMessage);
-  child.on("exit", (code) => {
-    const err = new Error(`kokoro worker exited unexpectedly (code ${code})`);
-    for (const chan of activeChannels.values()) chan.finish(err);
-  });
 
   async function* synthesize(text: string): AsyncIterable<Int16Array> {
+    if (disposed) throw new Error("kokoro tts already disposed");
     const id = nextId++;
     activeId = id;
     const chan = createChannel<Int16Array>();
@@ -198,5 +235,12 @@ export async function createKokoroTts(opts: { voice?: string } = {}): Promise<Tt
     activeChannels.get(id)?.abort(); // stop yielding immediately, discarding anything already buffered
   }
 
-  return { synthesize, stop };
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    failAllActive(new Error("kokoro tts disposed"));
+    child.kill("SIGTERM");
+  }
+
+  return { synthesize, stop, dispose };
 }
