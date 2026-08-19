@@ -32,7 +32,11 @@ describe.skipIf(!ready)("pipeline integration (real models)", () => {
     expect(events.some((e) => e.kind === "wake")).toBe(true);
     const final = events.find((e) => e.kind === "final") as { kind: "final"; text: string } | undefined;
     expect(final).toBeDefined();
-    expect(final!.text.toLowerCase()).toContain("haiku");
+    // whisper mis-transcribes the trailing "haiku" nondeterministically (~40% of runs
+    // produce "hyper inid"/"hiker"/etc. instead), so we anchor on "file" and "notes",
+    // reliably-transcribed mid-utterance tokens (25/25 in a 25-run characterization).
+    expect(final!.text.toLowerCase()).toContain("file");
+    expect(final!.text.toLowerCase()).toContain("notes");
     expect(final!.text.toLowerCase()).not.toContain("hey claude");
   }, 180_000);
 });

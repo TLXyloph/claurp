@@ -72,7 +72,11 @@ describe.skipIf(!ready)("daemon e2e (FakeAgent, real audio pipeline + real Kokor
         (m) => m.type === "transcript.final" && typeof m.text === "string",
         60_000,
       );
-      expect((final.text as string).toLowerCase()).toContain("haiku");
+      // whisper mis-transcribes the trailing "haiku" nondeterministically (~40% of runs
+      // produce "hyper inid"/"hiker"/etc. instead), so we anchor on "file" and "notes",
+      // reliably-transcribed mid-utterance tokens (25/25 in a 25-run characterization).
+      expect((final.text as string).toLowerCase()).toContain("file");
+      expect((final.text as string).toLowerCase()).toContain("notes");
 
       const permission = await waitFor(
         () => messages,
