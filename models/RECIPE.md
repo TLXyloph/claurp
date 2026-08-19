@@ -87,6 +87,50 @@ Generated `models/keywords-hey-claude.txt` (committed, one line, verbatim):
 ▁HE Y ▁C LA U DE @HEY_CLAUDE
 ```
 
+## Speech fixture voice (Task 6)
+
+`packages/daemon/tools/make-fixtures.ts` synthesizes the speech fixtures
+(`hey_claude.wav`, `hey_claude_status.wav`, `hey_claude_create_file.wav`,
+`allow.wav`, `plain_speech.wav`) via macOS `say`. Originally this used
+whatever voice was the system default (unspecified/unpinned); Task 6's
+amended scope pinned it explicitly to **`say -v Karen`** (`en_AU`).
+
+**Why:** the smart-turn-v3 end-of-turn model (`src/audio/turn.ts`) needs a
+fixture where a complete utterance and a mid-word-cut utterance produce
+clearly different completion probabilities. The system-default voice's flat,
+TTS-typical prosody didn't separate them *at all* against the real model
+(full=0.041, cut=0.517 — inverted), even with provably-correct mel-spectrogram
+preprocessing (independently verified bit-identical against a Python
+ground-truth run of the canonical reference). This is consistent with
+smart-turn-v3.0's own release notes, which flag heavy reliance on synthetic
+TTS training data as a known accuracy weakness.
+
+**How Karen was chosen:** an empirical matrix (5 voice engines — the
+system-default `say` voice, `say -v Daniel` (en_GB), `say -v Karen` (en_AU),
+`say -v "Shelley (English (US))"`, and `kokoro-js` (`af_heart`, run via
+`onnx-community/Kokoro-82M-v1.0-ONNX`, 24kHz resampled to 16kHz) — crossed
+with 3 trailing-silence-trim settings applied inside `turn.ts`'s
+preprocessing) against the real `smart-turn-v3.onnx` model. `say -v Karen`
+combined with a <=200ms trailing-silence trim was the first configuration (in
+the matrix's tested order) with comfortable, 3-run-stable separation:
+full=0.6616, cut=0.0236. Full matrix table in `task-6-report.md`.
+
+**kokoro-js note:** added as a `devDependency` of `@claurp/daemon`
+(`kokoro-js`, Apache-2.0) purely for this voice experiment; it did not win
+(both full and cut scored ~0.96-0.98 — no separation at all) so no fixture
+uses it, but the dependency was kept since a later task may want it as a
+runtime TTS engine. Its backend (`@huggingface/transformers`, also added as
+a `devDependency`) caches the ~90MB `onnx-community/Kokoro-82M-v1.0-ONNX`
+model under `~/.claurp/models/hf/` via `env.cacheDir` (set explicitly before
+`from_pretrained()` — the package's own re-exported `env` does *not* carry a
+`cacheDir` property, only `wasmPaths`; only the real
+`@huggingface/transformers` `env` singleton does. `HF_HOME` has no effect at
+all on this JS library — that's a Python-`transformers`-only convention).
+Generating kokoro audio must run in a separate process from any code that
+also loads `onnxruntime-node` directly (e.g. `turn.ts`'s own session) —
+`@huggingface/transformers` bundles its own `onnxruntime-node` native addon,
+and loading two instances in one process crashes with `std::bad_alloc`.
+
 ## Model licensing (spec open question #1)
 
 Checked the KWS model's release page directly:

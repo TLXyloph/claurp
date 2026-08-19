@@ -39,7 +39,14 @@ export async function createWakeSpotter(opts: { keywordsFile?: string } = {}): P
     },
     keywordsFile,
     keywordsScore: 2.0,
-    keywordsThreshold: 0.25,
+    // 0.25 -> 0.2 (Task 6 amended-scope fixture-voice change): regenerating the fixtures with
+    // `say -v Karen` (tools/make-fixtures.ts, see turn.ts/task-6-report.md for why) made the
+    // standalone "hey claude" fixture (hey_claude.wav, no trailing sentence) just miss the
+    // 0.25 threshold. Swept score in {2.0..3.0} x threshold in {0.25,0.2,0.15} (the sanctioned
+    // tuning window) against all four wake fixtures; threshold=0.2 at the original score=2.0
+    // was the first passing combination, so score was left untouched. Still within the
+    // sanctioned floor of >=0.15.
+    keywordsThreshold: 0.2,
   });
   let stream = kws.createStream();
   return {
