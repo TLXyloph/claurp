@@ -188,10 +188,15 @@ export async function createKokoroTts(opts: { voice?: string; workerEntry?: stri
   // fails any in-flight synthesize() calls with a clear error instead of
   // leaving them hanging or letting the error escape unhandled.
   child.on("error", (err) => {
+    // Review fix (Minor): previously silent -- failAllActive() fails in-flight synthesize()
+    // calls, but a caller not currently mid-synthesize() would otherwise have no idea TTS
+    // output just died until their next speak() attempt also fails.
+    console.warn(`claurp: kokoro worker errored, TTS output has stopped: ${err.message}`);
     failAllActive(err);
   });
   child.on("exit", (code) => {
     if (disposed) return; // expected — dispose() killed it
+    console.warn(`claurp: kokoro worker exited unexpectedly (code ${code}), TTS output has stopped`);
     failAllActive(new Error(`kokoro worker exited unexpectedly (code ${code})`));
   });
 

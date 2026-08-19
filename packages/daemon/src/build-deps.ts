@@ -46,28 +46,40 @@ export async function buildProductionDaemonDeps(opts: { defaultAdapter: string }
   const transcriber = createWhisperTranscriber();
   await transcriber.start();
 
-  const pipelineFactory = async (onEvent: (e: PipelineEvent) => void): Promise<PipelineLike> => {
-    const [vad, wake, turn] = await Promise.all([createSileroVad(), createWakeSpotter(), createSmartTurn()]);
-    return new AudioPipeline({ vad, wake, transcriber, turn }, onEvent);
-  };
+  // Review fix (Important): once the whisper-server child is running, anything below that
+  // throws (createKokoroTts() failing, loadProjects() finding no config.json, etc.) must not
+  // leave that child orphaned holding its port (default :17771). Everything from here on is
+  // wrapped so a mid-startup failure tears down whatever children already started before
+  // propagating -- callers (cli.ts) never see a thrown error that also leaked a process.
+  let tts: KokoroTtsHandle | undefined;
+  try {
+    tts = await createKokoroTts();
 
-  const tts = await createKokoroTts();
+    const pipelineFactory = async (onEvent: (e: PipelineEvent) => void): Promise<PipelineLike> => {
+      const [vad, wake, turn] = await Promise.all([createSileroVad(), createWakeSpotter(), createSmartTurn()]);
+      return new AudioPipeline({ vad, wake, transcriber, turn }, onEvent);
+    };
 
-  const adapters = new Map<string, AgentAdapter>([
-    ["fake", new FakeAgent()],
-    ["claude", new ClaudeAdapter()],
-  ]);
+    const adapters = new Map<string, AgentAdapter>([
+      ["fake", new FakeAgent()],
+      ["claude", new ClaudeAdapter()],
+    ]);
 
-  const deps: DaemonDeps = {
-    pipelineFactory,
-    adapters,
-    defaultAdapter: opts.defaultAdapter,
-    projects: loadProjects(),
-    policy: new PermissionPolicy(),
-    meter: loadMeterGuarded(),
-    narrator: new Narrator(),
-    tts,
-  };
+    const deps: DaemonDeps = {
+      pipelineFactory,
+      adapters,
+      defaultAdapter: opts.defaultAdapter,
+      projects: loadProjects(),
+      policy: new PermissionPolicy(),
+      meter: loadMeterGuarded(),
+      narrator: new Narrator(),
+      tts,
+    };
 
-  return { deps, transcriber, tts };
+    return { deps, transcriber, tts };
+  } catch (err) {
+    await transcriber.stop();
+    tts?.dispose();
+    throw err;
+  }
 }

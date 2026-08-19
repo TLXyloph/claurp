@@ -266,6 +266,21 @@ agent. Missing capabilities degrade honestly per principle 5.
   **"what exactly?"** (reads full detail). Notification buttons mirror
   the verbs. No response → the session waits; the notification
   persists; a reminder is spoken once after 60 s.
+- **Known v0.1 limitation — `bypassPermissions` mode disables the
+  backstop entirely.** The above ask flow (and the hard deny-list
+  behind it) is enforced through the Claude Agent SDK's `canUseTool`
+  permission callback. In `bypassPermissions` mode the SDK does not
+  invoke `canUseTool` at all, so nothing arrives at the daemon for
+  classification or deny-listing — a recursive delete or a force-push
+  would run unmediated, exactly as it would if the user ran it
+  directly in a terminal. The daemon has no architectural point to
+  intercept this while a session is in bypass mode; it can only gate
+  *entry* into the mode (spoken confirmation required — "confirm
+  bypass" — with the narrator warning first). v0.1 keeps bypass mode
+  rather than removing it, since it is a legitimate, pre-existing
+  Claude Code capability and refusing to expose it would make claurp
+  strictly less capable than typing the same command in a terminal.
+  Revisit if/when the SDK exposes bypass-mode tool visibility.
 
 ### 5.5 Meter service (usage without touching context)
 

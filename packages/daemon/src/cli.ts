@@ -35,22 +35,40 @@ async function main(): Promise<void> {
   const { deps, transcriber, tts } = await buildProductionDaemonDeps({ defaultAdapter: args.adapter });
 
   const server = new DaemonServer(deps, { port: args.port });
-  const port = await server.start();
+  let port: number;
+  try {
+    port = await server.start();
+  } catch (err) {
+    // Review fix (Important): the whisper/kokoro children buildProductionDaemonDeps() spawned
+    // above are already running by this point -- if start() throws (e.g. port already in
+    // use), tear them down before exiting so neither is left orphaned (whisper-server holding
+    // its port, or a resident kokoro worker process).
+    console.error("claurp-daemon: fatal startup error:", err);
+    tts.dispose();
+    await transcriber.stop();
+    process.exit(1);
+  }
   console.log(`claurp-daemon listening on ws://127.0.0.1:${port}`);
 
   let shuttingDown = false;
-  process.on("SIGINT", () => {
+  const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     void (async () => {
-      console.log("claurp-daemon: shutting down...");
+      console.log(`claurp-daemon: shutting down (${signal})...`);
       await server.stop();
       deps.meter.persist();
       tts.dispose();
       await transcriber.stop();
       process.exit(0);
     })();
-  });
+  };
+  // Review fix (Important): SIGTERM (the default signal `kill`/process managers/systemd send)
+  // gets the exact same graceful shutdown as SIGINT (Ctrl-C) -- previously only SIGINT was
+  // handled, so anything sending SIGTERM would hard-kill the process, orphaning the
+  // whisper-server and kokoro worker children.
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 main().catch((err: unknown) => {

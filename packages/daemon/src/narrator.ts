@@ -22,6 +22,24 @@ const MODE_NAMES: Record<string, string> = {
   bypassPermissions: "bypass permissions",
 };
 
+// Review fix (Minor): metaStatus() used to speak SessionRecord's raw state enum values
+// verbatim ("flaky test fix is needs-permission") -- that reads like a status code, not a
+// sentence, on a voice-only surface. Humanized phrasing for every state metaStatus() can see;
+// falls back to the raw value for anything not listed (defensive, not expected in practice).
+const STATE_PHRASES: Record<string, string> = {
+  spawning: "starting up",
+  working: "working",
+  "needs-permission": "waiting on permission",
+  "needs-input": "waiting on your input",
+  done: "done",
+  failed: "stopped with an error",
+  "handed-off": "open in your terminal",
+};
+
+function speakableState(state: string): string {
+  return STATE_PHRASES[state] ?? state;
+}
+
 export class Narrator {
   private readonly verbosity: Verbosity;
 
@@ -84,8 +102,8 @@ export class Narrator {
    *  rather than staying silent -- silence would be ambiguous with "I didn't hear you". */
   metaStatus(roster: Array<{ label: string; state: string }>): string {
     if (roster.length === 0) return "No sessions running.";
-    if (roster.length === 1) return `${roster[0].label} is ${roster[0].state}.`;
-    const parts = roster.map((r) => `${r.label} is ${r.state}`).join("; ");
+    if (roster.length === 1) return `${roster[0].label} is ${speakableState(roster[0].state)}.`;
+    const parts = roster.map((r) => `${r.label} is ${speakableState(r.state)}`).join("; ");
     return `You have ${roster.length} sessions: ${parts}.`;
   }
 

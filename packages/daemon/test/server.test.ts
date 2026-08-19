@@ -203,6 +203,20 @@ describe("DaemonServer", () => {
     onEvent({ kind: "wake" }); // fires essentially immediately after, while that speak is in flight
     await waitFor(() => countWhere((m) => m.type === "speak.stop") > speakStopBefore);
   });
+
+  // Review fix (Critical): the WS server must bind loopback-only, never 0.0.0.0 (ws's own
+  // default) -- a LAN-reachable daemon would let another machine approve agent permissions,
+  // inject mic frames, or read transcripts. A full external-interface reachability probe isn't
+  // practical in CI (would need a second real network interface), so this asserts the actual
+  // bound address directly instead of just the constructor options passed in.
+  it("binds the WS server to 127.0.0.1 only, never 0.0.0.0", () => {
+    const addr = server.address();
+    expect(addr).not.toBeNull();
+    expect(typeof addr).toBe("object");
+    if (typeof addr === "object" && addr !== null) {
+      expect(addr.address).toBe("127.0.0.1");
+    }
+  });
 });
 
 describe("DaemonServer session-pump error isolation (review fix round)", () => {

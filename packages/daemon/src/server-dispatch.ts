@@ -174,6 +174,17 @@ function dispatchMode(intent: Extract<Intent, { kind: "mode" }>, ctx: DispatchCo
     ctx.speak(refusal);
     return;
   }
+  // Review fix (Important, documentation only -- accepted v0.1 limitation, no behavior
+  // change): when intent.mode === "bypassPermissions", the Claude Agent SDK does not invoke
+  // `canUseTool` at all in that mode, so PermissionPolicy's hardDeny() list (server.ts's
+  // pumpSession() -> policy.decide()) is never consulted for anything the agent does next --
+  // a destructive command like `rm -rf /` would run unmediated. The daemon architecturally
+  // cannot enforce the deny-list backstop once a session is in bypass mode; it can only gate
+  // entry into that mode (this line requires an explicit prior spoken "confirm bypass" --
+  // `intent.confirmed` above -- and the narrator's `bypassConfirmNeeded()` warns before that).
+  // v0.1 keeps bypass anyway: it's a legitimate, existing Claude Code mode, and refusing to
+  // ever set it would make claurp less capable than typing the same command directly in a
+  // terminal. Documented as a known limitation in spec §5.4, not silently accepted.
   ctx.manager.setPermissionMode(focused.id, intent.mode);
   ctx.speak(ctx.narrator.modeChanged(focused.label, intent.mode));
 }

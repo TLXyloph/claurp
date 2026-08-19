@@ -1,8 +1,7 @@
 // Daemon WS server orchestration (Task 16, capstone): wires protocol (T1), the audio pipeline
 // (T7), the intent router (T8), agent adapters (T9/T12), SessionManager (T10), PermissionPolicy
-// (T11), MeterService (T13), Narrator (T14), and TTS (T15) into one WebSocket server. The
-// dispatch-contract table in task-16-brief.md is the spec this file (plus server-dispatch.ts)
-// implements exactly.
+// (T11), MeterService (T13), Narrator (T14), and TTS (T15) into one WS server, per the
+// dispatch-contract table in task-16-brief.md (this file plus server-dispatch.ts).
 import type { AgentAdapter, AgentEvent, DaemonToSensesMsg, SensesToDaemonMsg } from "@claurp/protocol";
 import {
   BIN_MIC_PCM16_16K,
@@ -24,7 +23,7 @@ import { SessionManager, type SessionRecord } from "./sessions/manager.js";
 import type { Project } from "./sessions/projects.js";
 import { SentenceSplitter } from "./tts/sentences.js";
 import type { TtsEngine } from "./tts/kokoro.js";
-import { runHandoffTerminal, toBuffer } from "./server-util.js";
+import { runHandoffTerminal, toBuffer, wssAddress } from "./server-util.js";
 
 export interface PipelineLike {
   feed(f: Int16Array): Promise<void>;
@@ -59,13 +58,10 @@ export class DaemonServer {
   private readonly clients = new Map<WebSocket, { missed: number }>();
   private primary: WebSocket | null = null;
   private micRemainder: Int16Array = new Int16Array(0);
-  // Serializes every pipeline.feed()/pttDown()/pttUp() call. AudioPipeline.pttDown() (T7)
-  // mutates state synchronously OUTSIDE its own internal feed()/pttUp() promise chain -- a
-  // latent race if it ran concurrently with an in-flight feed(). The WS layer only has a single
-  // authoritative mic source (the primary client, see clients/primary above), but its message
-  // handlers are still separate async callbacks; this chain is what actually guarantees the
-  // "one message at a time, strictly in arrival order" property T7's carry-forward note
-  // requires, rather than just asserting it by convention.
+  // Serializes every pipeline.feed()/pttDown()/pttUp() call -- AudioPipeline.pttDown() (T7)
+  // mutates state synchronously outside its own feed()/pttUp() promise chain, a latent race if
+  // called concurrently with an in-flight feed(). This chain guarantees the "one message at a
+  // time, in arrival order" property T7's carry-forward note requires, structurally.
   private pipelineChain: Promise<void> = Promise.resolve();
 
   private globalState: StateMode = "idle";
@@ -75,9 +71,8 @@ export class DaemonServer {
   // first.
   private ttsAbortToken = 0;
   private speakChain: Promise<void> = Promise.resolve();
-  // Set by stop(). speak() calls queued-but-not-yet-started at that point would otherwise still
-  // reach tts.synthesize() later -- a real problem for callers (cli.ts's SIGINT handler,
-  // tools/demo.ts, test/e2e.test.ts) that call tts.dispose() right after awaiting stop().
+  // Set by stop(): queued-but-not-started speak() calls would otherwise still reach
+  // tts.synthesize() later -- a real problem for callers that dispose() tts right after stop().
   private stopped = false;
 
   private watchdogTimer: NodeJS.Timeout | null = null;
@@ -93,7 +88,10 @@ export class DaemonServer {
     this.pipeline = await this.deps.pipelineFactory((e) => this.onPipelineEvent(e));
     this.manager.onChange((record) => this.onSessionChange(record));
 
-    this.wss = new WebSocketServer({ port: this.opts.port ?? 8765 });
+    // Review fix (Critical): loopback-only. `ws` defaults host to 0.0.0.0 (LAN-reachable) --
+    // a LAN client could otherwise approve permissions off-box, inject mic frames, or read
+    // transcripts. No legitimate v0.1 reason for a remote client to reach this port.
+    this.wss = new WebSocketServer({ port: this.opts.port ?? 8765, host: "127.0.0.1" });
     await new Promise<void>((resolve, reject) => {
       this.wss!.once("listening", resolve);
       this.wss!.once("error", reject);
@@ -105,13 +103,16 @@ export class DaemonServer {
     return typeof address === "object" && address !== null ? address.port : (this.opts.port ?? 8765);
   }
 
+  /** Not part of the frozen Produces block -- purely additive, for the loopback-bind test. */
+  address(): ReturnType<typeof wssAddress> {
+    return wssAddress(this.wss);
+  }
+
   async stop(): Promise<void> {
     this.stopped = true;
     this.abortSpeaking();
-    if (this.watchdogTimer) {
-      clearInterval(this.watchdogTimer);
-      this.watchdogTimer = null;
-    }
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.watchdogTimer = null;
     for (const ws of this.clients.keys()) ws.terminate();
     this.clients.clear();
     this.primary = null;
@@ -192,7 +193,7 @@ export class DaemonServer {
         this.handlePtt(ws, msg.action);
         return;
       case "permission.response":
-        this.handlePermissionResponse(msg);
+        this.handlePermissionResponse(ws, msg);
         return;
     }
   }
@@ -238,7 +239,13 @@ export class DaemonServer {
     });
   }
 
-  private handlePermissionResponse(msg: PermissionResponseMsg): void {
+  // Review fix (Minor): gate to the primary client, same as mic/ptt -- a non-primary local
+  // view must not be able to approve/deny a session it isn't the recognized "driver" for.
+  private handlePermissionResponse(ws: WebSocket, msg: PermissionResponseMsg): void {
+    if (ws !== this.primary) {
+      console.warn("claurp: ignoring permission.response from a non-primary senses client");
+      return;
+    }
     const record = this.manager.roster().find((r) => r.id === msg.sessionId);
     if (!record || !record.pendingPermission || record.pendingPermission.requestId !== msg.requestId) return;
     applyPermissionDecision(record, msg.decision, {
@@ -290,11 +297,10 @@ export class DaemonServer {
 
   // ---- session event pump (spec dispatch table #4) ---------------------------------------
 
-  // Review fix (Important): the whole loop body is wrapped so an iterator REJECTION (e.g. a
-  // real adapter's transport dying mid-stream, as opposed to an in-band {kind:"error"} event)
-  // is handled exactly like a session error instead of becoming an unhandled rejection that
-  // could take the whole daemon down and skip cleanup. meter.persist()/recomputeGlobalState()
-  // run in `finally` so they happen on every exit path (normal completion OR failure).
+  // Review fix (Important): wrapped so an iterator REJECTION (adapter transport dying, vs. an
+  // in-band {kind:"error"} event) is handled like a session error, not an unhandled rejection
+  // that could take the daemon down. persist()/recomputeGlobalState() run in `finally` so they
+  // happen on every exit path.
   private async pumpSession(record: SessionRecord): Promise<void> {
     try {
       for await (const e of record.handle.events()) {
@@ -328,11 +334,8 @@ export class DaemonServer {
     }
   }
 
-  /** Iterator rejection (transport death, etc.) mid-`for await`, caught by pumpSession()'s
-   *  try/catch above. Treated identically to an in-band `{kind:"error"}` event: mark the
-   *  session failed through the normal manager.consume() path (so hud.session/state follow
-   *  the same rules an adapter-emitted error would), then notify + speak. Never rethrows --
-   *  this is the last line of defense before an unhandled rejection would otherwise escape. */
+  /** Iterator rejection, caught by pumpSession()'s try/catch. Treated like an in-band
+   *  `{kind:"error"}` event (same manager.consume()/notify/speak path). Never rethrows. */
   private handlePumpFailure(record: SessionRecord, err: unknown): void {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`claurp: session ${record.id}'s event stream failed`, err);

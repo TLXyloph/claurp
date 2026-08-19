@@ -128,7 +128,18 @@ describe("Narrator.metaStatus", () => {
     ];
     const spoken = new Narrator().metaStatus(roster);
     expect(spoken).toContain("auth refactor is working");
-    expect(spoken).toContain("flaky test fix is needs-permission");
+    expect(spoken).toContain("flaky test fix is waiting on permission");
+  });
+
+  // Review fix (Minor): raw SessionRecord state enum values are humanized, not spoken
+  // verbatim ("is needs-permission" reads like a status code, not a sentence).
+  it("humanizes every session state, not just needs-permission", () => {
+    const n = new Narrator();
+    expect(n.metaStatus([{ label: "a", state: "spawning" }])).toBe("a is starting up.");
+    expect(n.metaStatus([{ label: "a", state: "needs-input" }])).toBe("a is waiting on your input.");
+    expect(n.metaStatus([{ label: "a", state: "done" }])).toBe("a is done.");
+    expect(n.metaStatus([{ label: "a", state: "failed" }])).toBe("a is stopped with an error.");
+    expect(n.metaStatus([{ label: "a", state: "handed-off" }])).toBe("a is open in your terminal.");
   });
 });
 
