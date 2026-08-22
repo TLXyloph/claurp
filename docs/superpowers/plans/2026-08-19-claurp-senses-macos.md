@@ -798,7 +798,7 @@ Then: `pnpm install`
 - [ ] **Step 4: Generate and inspect**
 
 Run: `pnpm --filter @claurp/protocol golden`
-Expected: `claurp: wrote golden fixtures to …/Fixtures`; 25 `.json` files + 2 `.bin` files exist; `frames/mic.bin` is 21 bytes starting `0x01`.
+Expected: `claurp: wrote golden fixtures to …/Fixtures`; 30 `.json` files (24 daemon→senses + 6 senses→daemon) + 2 `.bin` files exist; `frames/mic.bin` is 21 bytes starting `0x01`.
 
 Run: `pnpm --filter @claurp/protocol test` — Expected: PASS.
 
@@ -1938,7 +1938,12 @@ final class StubWsServer {
     private(set) var receivedBinary: [Data] = []
     var onText: ((String) -> Void)?
     var onBinary: ((Data) -> Void)?
-    let port: UInt16
+    // Default-initialized so the handler closures below may capture self
+    // (all stored properties must be set before self is captured).
+    private(set) var port: UInt16 = 0
+    // Dedicated queue: the test thread blocks on the ready semaphore, so
+    // listener callbacks must NOT be scheduled on .main or init deadlocks.
+    private let queue = DispatchQueue(label: "claurp.stub-ws-server")
 
     init() throws {
         let params = NWParameters.tcp
@@ -1947,24 +1952,23 @@ final class StubWsServer {
         params.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
         listener = try NWListener(using: params, on: .any)
         let ready = DispatchSemaphore(value: 0)
-        var boundPort: UInt16 = 0
-        listener.stateUpdateHandler = { state in
+        listener.stateUpdateHandler = { [weak self] state in
             if case .ready = state {
-                boundPort = self.listener.port?.rawValue ?? 0
+                self?.port = self?.listener.port?.rawValue ?? 0
                 ready.signal()
             }
             if case .failed = state { ready.signal() }
         }
         listener.newConnectionHandler = { [weak self] conn in
-            self?.connection = conn
-            conn.start(queue: .main)
-            self?.receiveNext(on: conn)
+            guard let self else { return }
+            self.connection = conn
+            conn.start(queue: self.queue)
+            self.receiveNext(on: conn)
         }
-        listener.start(queue: .main)
-        guard ready.wait(timeout: .now() + 5) == .success, boundPort != 0 else {
+        listener.start(queue: queue)
+        guard ready.wait(timeout: .now() + 5) == .success, port != 0 else {
             throw XCTSkip("sandbox refused a loopback listener")
         }
-        port = boundPort
     }
 
     private func receiveNext(on conn: NWConnection) {
