@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "notify",
+  "title": "notes app",
+  "body": "Ready for review.",
+  "sessionId": "s-1",
+  "actions": [
+    "allow",
+    "deny",
+    "open-terminal"
+  ]
+}

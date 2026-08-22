@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "hud.permission",
+  "sessionId": "s-1",
+  "requestId": "r-1",
+  "tool": "Bash",
+  "detail": "rm -r build/",
+  "spoken": "The agent wants to delete the build folder."
+}

@@ -48,3 +48,10 @@ jobs:
 
       - name: Test
         run: pnpm -r test
+
+      # The Swift app replays these fixtures; if the TS schemas change without
+      # regenerating + committing them, fail here (no Mac needed to catch drift).
+      - name: Golden fixture drift gate
+        run: |
+          pnpm --filter @claurp/protocol golden
+          git diff --exit-code -- apps/senses-macos/Tests/ClaurpSensesCoreTests/Fixtures
