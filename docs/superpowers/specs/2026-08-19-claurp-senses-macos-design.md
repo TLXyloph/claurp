@@ -191,9 +191,12 @@ disconnected → connecting → helloSent → connected
   message handling start only after it.
 - The daemon's watchdog pings every 5 s and terminates after 3 missed
   pongs. Transport is `URLSessionWebSocketTask`, which auto-replies to
-  pings at the framework level — no code needed, but the loopback
-  integration test (§6.3) verifies the connection actually survives
-  >15 s against a pinging server.
+  pings at the framework level — no code needed. The loopback
+  integration test (§6.3) proves this auto-pong mechanism by having
+  its stub server ping the client repeatedly and then asserting the
+  connection survives and still delivers traffic afterward (~1.2 s);
+  a longer soak adds no further proof, since the stub has no
+  terminate-on-missed-pong watchdog of its own to survive against.
 - Any disconnect (including 4000 or daemon exit) → `disconnected`,
   offline HUD state, backoff reconnect loop. Reconnect resets backoff
   after a successful handshake.
@@ -218,10 +221,13 @@ mitigation.
   them and fails on `git diff --exit-code` — so a TS protocol change
   that isn't reflected in committed fixtures breaks CI even with no
   Mac in the loop.
-- Swift XCTest replays every fixture: decode → assert field-level
-  expectations; re-encode → re-decode → assert equality (JSON key
-  order may differ, so comparison is structural). Binary fixtures
-  round-trip through the Swift frame codec byte-for-byte.
+- Swift XCTest replays every fixture. Daemon→senses messages are
+  decode-only by design (no `DaemonMessage` encoder exists in the
+  Swift client): each fixture is decoded and asserted equal to the
+  expected value. Senses→daemon messages are encoded from the Swift
+  model and structurally compared against the fixture (JSON key order
+  may differ). Binary fixtures round-trip through the Swift frame
+  codec byte-for-byte.
 
 ### 6.2 Unit tests (`swift test`)
 
@@ -239,10 +245,12 @@ mitigation.
 ### 6.3 Integration and CI
 
 - One loopback integration test: an in-process WebSocket server
-  (Network.framework `NWListener`) that pings every second; assert
-  handshake, a mic-frame send, a TTS-frame receive, and survival past
-  the pong watchdog window. Self-skips if the sandbox forbids
-  listening sockets.
+  (Network.framework `NWListener`) that pings repeatedly; assert
+  handshake, a mic-frame send, a TTS-frame receive, and that the
+  connection survives the pings and still delivers a message
+  afterward (~1.2 s) — proving the auto-pong mechanism, not a fixed
+  soak duration (see §5). Self-skips if the sandbox forbids listening
+  sockets.
 - CI: a new **macos-latest** job runs `swift test` (and `xcodegen
   generate` + `xcodebuild build` as a smoke check that the app target
   wires up). The existing ubuntu job keeps building/testing the daemon
