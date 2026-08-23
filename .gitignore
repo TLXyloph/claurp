@@ -7,3 +7,7 @@ build/
 *.log
 .claurp/
 demo-out.wav
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
