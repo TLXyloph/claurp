@@ -45,7 +45,13 @@ struct WaveformView: View {
     }
 
     private func drawBars(context: GraphicsContext, size: CGSize, date: Date) {
-        let smoothed = smoother.advance(toward: levelStore.level)
+        // Perceptual (sqrt) scaling with a small noise-floor cutoff: ambient
+        // room noise (rms < ~0.01) reads as near-still, while speech —
+        // which sqrt boosts much more than a linear map would — visibly
+        // moves the bars.
+        let rawLevel = levelStore.level
+        let perceptualLevel = rawLevel < 0.01 ? 0 : sqrt(rawLevel)
+        let smoothed = smoother.advance(toward: perceptualLevel)
         let t = date.timeIntervalSinceReferenceDate
         var x: CGFloat = (size.width - totalWidth) / 2
         for i in 0..<barCount {
