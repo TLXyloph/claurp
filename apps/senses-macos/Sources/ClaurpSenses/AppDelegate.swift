@@ -2,14 +2,6 @@ import AppKit
 import AVFoundation
 import ClaurpSensesCore
 
-// Replaced by real implementations in Task 15.
-final class NoopEarcons: EarconPlayerType {
-    func play(_ kind: EarconKind) {}
-}
-final class NoopNotifier: NotificationPresenterType {
-    func present(_ notify: NotifyPayload) {}
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var controller: SensesController!
     private var statusItem: NSStatusItem!
@@ -28,12 +20,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scheduleRetry: { delay, block in
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: block)
             })
+        let notifier = NotificationPresenter()
+        notifier.setUp()
+
         controller = SensesController(
             connection: connection,
             mic: MicCaptureEngine(),
             playback: TtsPlaybackController(scheduler: EnginePcmScheduler()),
-            earcons: NoopEarcons(),
-            notifier: NoopNotifier())
+            earcons: EarconPlayer(),
+            notifier: notifier)
+
+        notifier.onDecision = { [weak self] sessionId, requestId, decision in
+            DispatchQueue.main.async {
+                self?.controller.respond(sessionId: sessionId,
+                                         requestId: requestId,
+                                         decision: decision)
+            }
+        }
 
         setUpStatusItem()
         pillPanel = PillPanel(store: hudStore) { [weak self] card, decision in
