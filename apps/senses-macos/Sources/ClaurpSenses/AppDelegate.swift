@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var reconnectItem: NSMenuItem!
     private var micDeniedItem: NSMenuItem!
     private var paused = false
+    private let hudStore = HudStore()
+    private var pillPanel: PillPanel!
+    private var offlineHideTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let connection = ConnectionManager(
@@ -33,6 +36,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             notifier: NoopNotifier())
 
         setUpStatusItem()
+        pillPanel = PillPanel(store: hudStore) { [weak self] card, decision in
+            self?.controller.respond(sessionId: card.sessionId,
+                                     requestId: card.requestId,
+                                     decision: decision)
+        }
         controller.onHudChange = { [weak self] hud in self?.hudChanged(hud) }
 
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
@@ -47,10 +55,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.quit()
     }
 
-    /// Tasks 14–16 extend this (pill panel, etc.).
+    /// Tasks 15–16 extend this (earcons, notifications).
     func hudChanged(_ hud: HudState) {
         statusItem.button?.image = StatusIcon.image(for: hud)
         reconnectItem.isHidden = !hud.offline
+        hudStore.state = hud
+        offlineHideTimer?.invalidate()
+        switch hud.pill {
+        case .hidden:
+            pillPanel.orderOut(nil)
+        case .offline:
+            pillPanel.refreshSize()
+            pillPanel.orderFrontRegardless()
+            // Offline chip auto-hides; the status icon keeps the persistent signal.
+            offlineHideTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
+                self?.pillPanel.orderOut(nil)
+            }
+        default:
+            pillPanel.refreshSize()
+            pillPanel.orderFrontRegardless()
+        }
     }
 
     private func setUpStatusItem() {
