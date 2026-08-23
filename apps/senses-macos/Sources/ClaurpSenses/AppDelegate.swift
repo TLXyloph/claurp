@@ -11,7 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var paused = false
     private var micDenied = false
     private let hudStore = HudStore()
-    private var pillPanel: PillPanel!
+    private let micLevelStore = MicLevelStore()
+    private var notchPanel: NotchPanel!
     private var offlineHideTimer: Timer?
     private let pttHotKey = PttHotKey()
 
@@ -32,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             earcons: EarconPlayer(),
             notifier: notifier)
 
+        controller.onMicLevel = { [weak self] level in self?.micLevelStore.level = level }
+
         pttHotKey.onDown = { [weak self] in self?.controller.pttDown() }
         pttHotKey.onUp = { [weak self] in self?.controller.pttUp() }
         pttHotKey.register()
@@ -45,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         setUpStatusItem()
-        pillPanel = PillPanel(store: hudStore) { [weak self] card, decision in
+        notchPanel = NotchPanel(store: hudStore, levelStore: micLevelStore) { [weak self] card, decision in
             self?.controller.respond(sessionId: card.sessionId,
                                      requestId: card.requestId,
                                      decision: decision)
@@ -75,17 +78,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         offlineHideTimer?.invalidate()
         switch hud.pill {
         case .hidden:
-            pillPanel.orderOut(nil)
+            notchPanel.hide()
         case .offline:
-            pillPanel.refreshSize()
-            pillPanel.orderFrontRegardless()
+            notchPanel.show()
             // Offline chip auto-hides; the status icon keeps the persistent signal.
             offlineHideTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
-                self?.pillPanel.orderOut(nil)
+                self?.notchPanel.hide()
             }
         default:
-            pillPanel.refreshSize()
-            pillPanel.orderFrontRegardless()
+            notchPanel.show()
         }
     }
 
