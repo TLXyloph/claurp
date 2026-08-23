@@ -22,6 +22,19 @@ public final class MicCaptureEngine: MicCaptureType {
     public func start() throws {
         guard !isRunning else { return }
         let input = engine.inputNode
+        // AEC subtracts our own device playback (earcons, TTS) from the
+        // captured signal so the daemon never hears — and phantom-transcribes
+        // — the app's own speaker output (spec §3.1).
+        if (try? input.setVoiceProcessingEnabled(true)) == nil {
+            NSLog("claurp: failed to enable voice processing (AEC); continuing un-cancelled")
+        } else {
+            // Voice processing ducks other audio (our TTS) by default; disable
+            // that so our own playback isn't attenuated while AEC cancels it.
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
+        // Query the format AFTER enabling voice processing — it can change
+        // the input node's format (e.g. to 16 kHz mono for AEC processing).
         let format = input.inputFormat(forBus: 0)
         resampler = MicResampler(inputSampleRate: format.sampleRate)
         chunker.reset()
