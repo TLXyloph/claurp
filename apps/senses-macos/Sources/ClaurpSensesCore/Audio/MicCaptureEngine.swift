@@ -25,6 +25,13 @@ public final class MicCaptureEngine: MicCaptureType {
         let format = input.inputFormat(forBus: 0)
         resampler = MicResampler(inputSampleRate: format.sampleRate)
         chunker.reset()
+        // No input device (e.g. a headless Mac): inputFormat(forBus:) returns a
+        // 0 Hz/0-channel format, which crashes installTap with an uncatchable
+        // NSException. Bail out before it, leaving isRunning false.
+        guard format.sampleRate > 0, format.channelCount > 0, resampler != nil else {
+            NSLog("claurp: no usable audio input device; not starting capture")
+            return
+        }
         // Capture resampler into closure to avoid reading property from audio thread
         let resampler = self.resampler
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in

@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var reconnectItem: NSMenuItem!
     private var micDeniedItem: NSMenuItem!
     private var paused = false
+    private var micDenied = false
     private let hudStore = HudStore()
     private var pillPanel: PillPanel!
     private var offlineHideTimer: Timer?
@@ -53,8 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
             DispatchQueue.main.async {
-                self?.micDeniedItem.isHidden = granted
-                self?.controller.start()
+                guard let self else { return }
+                self.micDeniedItem.isHidden = granted
+                self.micDenied = !granted
+                self.statusItem.button?.image = StatusIcon.image(for: self.controller.hud, micDenied: self.micDenied)
+                self.controller.start()
             }
         }
     }
@@ -65,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Tasks 15–16 extend this (earcons, notifications).
     func hudChanged(_ hud: HudState) {
-        statusItem.button?.image = StatusIcon.image(for: hud)
+        statusItem.button?.image = StatusIcon.image(for: hud, micDenied: micDenied)
         reconnectItem.isHidden = !hud.offline
         hudStore.state = hud
         offlineHideTimer?.invalidate()
@@ -87,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = StatusIcon.image(for: controller.hud)
+        statusItem.button?.image = StatusIcon.image(for: controller.hud, micDenied: micDenied)
 
         let menu = NSMenu()
         pauseItem = NSMenuItem(title: "Pause Listening",

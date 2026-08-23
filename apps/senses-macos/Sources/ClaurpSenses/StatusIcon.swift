@@ -3,9 +3,13 @@ import ClaurpSensesCore
 
 enum StatusIcon {
     /// SF Symbol per HUD condition; template images track the menu-bar tint.
-    static func image(for hud: HudState) -> NSImage? {
+    /// `micDenied` takes precedence over all other states (spec §3.1): a
+    /// denied mic means no audio is flowing regardless of connection state.
+    static func image(for hud: HudState, micDenied: Bool = false) -> NSImage? {
         let name: String
-        if hud.offline {
+        if micDenied {
+            name = "mic.slash"
+        } else if hud.offline {
             name = "bolt.slash"
         } else if hud.paused {
             name = "pause.circle"
