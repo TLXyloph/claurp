@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notchPanel: NotchPanel!
     private var offlineHideTimer: Timer?
     private let pttHotKey = PttHotKey()
+    private var micEngine: MicCaptureEngine!
+    // HudState() starts offline == true; mirror that so the first real
+    // transition (offline -> online) is the one that gets logged.
+    private var wasOffline = true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let connection = ConnectionManager(
@@ -26,9 +30,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let notifier = NotificationPresenter()
         notifier.setUp()
 
+        let mic = MicCaptureEngine()
+        micEngine = mic
+        mic.onTapStats = { tapRms, tapFrames, chunksEmitted in
+            DebugAudioLog.log(String(format: "tap rms=%.4f frames=%d chunks=%d",
+                                     tapRms, tapFrames, chunksEmitted))
+        }
+
         controller = SensesController(
             connection: connection,
-            mic: MicCaptureEngine(),
+            mic: mic,
             playback: TtsPlaybackController(scheduler: EnginePcmScheduler()),
             earcons: EarconPlayer(),
             notifier: notifier)
@@ -62,6 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.micDenied = !granted
                 self.statusItem.button?.image = StatusIcon.image(for: self.controller.hud, micDenied: self.micDenied)
                 self.controller.start()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    guard let self else { return }
+                    DebugAudioLog.log("start: \(self.micEngine.lastStartDescription)")
+                }
             }
         }
     }
@@ -74,6 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func hudChanged(_ hud: HudState) {
         statusItem.button?.image = StatusIcon.image(for: hud, micDenied: micDenied)
         reconnectItem.isHidden = !hud.offline
+        if hud.offline != wasOffline {
+            wasOffline = hud.offline
+            DebugAudioLog.log("connection: offline=\(hud.offline)")
+        }
         hudStore.state = hud
         offlineHideTimer?.invalidate()
         switch hud.pill {
