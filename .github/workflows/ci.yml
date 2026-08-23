@@ -55,3 +55,24 @@ jobs:
         run: |
           pnpm --filter @claurp/protocol golden
           git diff --exit-code -- apps/senses-macos/Tests/ClaurpSensesCoreTests/Fixtures
+
+  senses:
+    name: senses (swift test · app build)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift tests
+        run: swift test --package-path apps/senses-macos
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec apps/senses-macos/project.yml --project apps/senses-macos
+
+      - name: Build app (unsigned)
+        run: >
+          xcodebuild -project apps/senses-macos/ClaurpSenses.xcodeproj
+          -scheme ClaurpSenses -configuration Debug build
+          CODE_SIGNING_ALLOWED=NO
