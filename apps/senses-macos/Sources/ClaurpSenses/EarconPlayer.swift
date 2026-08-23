@@ -16,6 +16,12 @@ final class EarconPlayer: EarconPlayerType {
     }
 
     func play(_ kind: EarconKind) {
+        // The wake acknowledgment is now visual (notch opens + waveform) per
+        // user request; the beep also risks acoustic feedback. Opt back in
+        // with claurpWakeEarcon.
+        if kind == .wakeAck, !UserDefaults.standard.bool(forKey: "claurpWakeEarcon") {
+            return
+        }
         guard let player = players[kind] else { return }
         player.currentTime = 0
         player.play()
