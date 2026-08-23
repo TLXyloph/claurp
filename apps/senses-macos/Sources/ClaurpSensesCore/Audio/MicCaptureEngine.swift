@@ -23,12 +23,16 @@ public final class MicCaptureEngine: MicCaptureType {
         let format = input.inputFormat(forBus: 0)
         resampler = MicResampler(inputSampleRate: format.sampleRate)
         chunker.reset()
+        // Capture resampler into closure to avoid reading property from audio thread
+        let resampler = self.resampler
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self, let channels = buffer.floatChannelData else { return }
             let mono = Array(UnsafeBufferPointer(start: channels[0],
                                                  count: Int(buffer.frameLength)))
-            guard let resampled = self.resampler?.resample(mono), !resampled.isEmpty else { return }
+            guard let resampled = resampler?.resample(mono), !resampled.isEmpty else { return }
             DispatchQueue.main.async {
+                // Guard against post-stop execution of queued blocks
+                guard self.isRunning else { return }
                 for chunk in self.chunker.push(resampled) {
                     self.onChunk?(chunk)
                 }
