@@ -17,6 +17,8 @@ public final class MicCaptureEngine: MicCaptureType {
     public var onChunk: (([Int16]) -> Void)?
     public private(set) var isRunning = false
 
+    public init() {}
+
     public func start() throws {
         guard !isRunning else { return }
         let input = engine.inputNode
