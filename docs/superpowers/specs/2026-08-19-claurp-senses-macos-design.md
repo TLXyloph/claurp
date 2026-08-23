@@ -102,6 +102,8 @@ gap; see §8).
 - AVAudioEngine input tap at the hardware format → `AVAudioConverter`
   → 16 kHz mono Int16 → `0x01` binary frames, sent in ~20 ms chunks
   (320 samples / 640 bytes) to keep wake-word latency low.
+- The mic input is voice-processed (AEC) so the daemon never hears the
+  app's own earcons or TTS played back through the speakers.
 - **Streaming is continuous by default** — the daemon owns wake-word
   detection, so "hey claude" only works if audio is always flowing.
   Privacy posture: audio goes to a loopback-bound local daemon and
@@ -146,21 +148,23 @@ local states: `idle`, `listening`, `working`, `needs-you`,
 `disconnected` (offline), and `paused`. Menu: Pause/Resume Listening,
 Reconnect Now (only while offline), Quit.
 
-### 4.2 Floating pill
+### 4.2 Notch drop-down
 
-One compact, non-activating `NSPanel` (`.floating` level, joins all
-Spaces, ignores mouse except its own controls), SwiftUI content.
-Default position top-right; draggable, position remembered.
+One compact, non-activating `NSPanel` (`.statusBar` level, joins all
+Spaces, stationary, ignores mouse except its own controls), SwiftUI
+content. Fixed top-center position, flush with the screen's top edge —
+visually extending the MacBook notch — and non-draggable; it animates
+open (slides down) and closed (retracts) rather than simply appearing.
 
-| Daemon state | Pill shows |
+| Daemon state | Panel shows |
 |---|---|
 | `idle` | hidden |
-| `listening` | live transcript (`transcript.partial` overwritten in place; `transcript.final` replaces it and holds until the next state change) |
+| `listening` | a level-reactive waveform (driven by live mic input) + live transcript (`transcript.partial` overwritten in place; `transcript.final` replaces it and holds until the next state change) |
 | `working` | session label + latest `hud.session.narration` |
 | `needs-you` | permission card: `tool`, `detail`, **Allow / Deny** buttons → `permission.response` (allow/deny; "always" is voice-only in v0.1) |
 | `disconnected` | small "claurp offline" chip (auto-hides after a few seconds; menu-bar icon carries the persistent signal) |
 
-The pill is driven by a pure reducer: `HudViewModel` folds
+The panel is driven by a pure reducer: `HudViewModel` folds
 daemon messages into a `HudState` value — fully unit-testable with no
 AppKit imports.
 
