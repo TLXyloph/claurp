@@ -35,6 +35,33 @@ public final class MicCaptureEngine: MicCaptureType {
 
     public init() {}
 
+    /// Pins `input`'s CoreAudio device to `deviceID` via
+    /// `kAudioOutputUnitProperty_CurrentDevice`, returning a description of
+    /// the outcome for `lastStartDescription`/NSLog. Shared by both the
+    /// built-in-mic pin and the user-override pin (`claurpInputDeviceUID`)
+    /// so both log/describe identically.
+    private static func pin(_ input: AVAudioInputNode, to deviceID: AudioDeviceID, label: String) -> String {
+        guard let audioUnit = input.audioUnit else {
+            NSLog("claurp: input node has no audioUnit; cannot pin \(label), continuing with default input")
+            return "default input (no audioUnit)"
+        }
+        var deviceIDVar = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceIDVar,
+            UInt32(MemoryLayout<AudioDeviceID>.size))
+        if status == noErr {
+            NSLog("claurp: pinned capture input to \(label)")
+            return label
+        } else {
+            NSLog("claurp: failed to pin capture input to \(label), status \(status); continuing with default input")
+            return "default input (pin failed, status \(status))"
+        }
+    }
+
     public func start() throws {
         guard !isRunning else { return }
         let input = engine.inputNode
@@ -45,30 +72,16 @@ public final class MicCaptureEngine: MicCaptureType {
         // silent virtual device, starving the daemon of real audio. Pinning
         // first keeps channel 0 on the real mic (spec §3.1).
         let deviceDescription: String
-        if UserDefaults.standard.bool(forKey: "claurpUseDefaultInput") {
+        if let overrideUID = UserDefaults.standard.string(forKey: "claurpInputDeviceUID"),
+           let overrideDeviceID = AudioInputDevice.device(withUID: overrideUID) {
+            NSLog("claurp: claurpInputDeviceUID set (\(overrideUID)); pinning to that device")
+            deviceDescription = Self.pin(input, to: overrideDeviceID,
+                                        label: "device \(overrideDeviceID) (user-selected)")
+        } else if UserDefaults.standard.bool(forKey: "claurpUseDefaultInput") {
             NSLog("claurp: claurpUseDefaultInput set; using system default input device")
             deviceDescription = "default input (claurpUseDefaultInput set)"
         } else if let deviceID = AudioInputDevice.builtInInputID() {
-            if let audioUnit = input.audioUnit {
-                var deviceIDVar = deviceID
-                let status = AudioUnitSetProperty(
-                    audioUnit,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    &deviceIDVar,
-                    UInt32(MemoryLayout<AudioDeviceID>.size))
-                if status == noErr {
-                    NSLog("claurp: pinned capture input to built-in mic (device \(deviceID))")
-                    deviceDescription = "device \(deviceID)"
-                } else {
-                    NSLog("claurp: failed to pin capture input to built-in mic (device \(deviceID)), status \(status); continuing with default input")
-                    deviceDescription = "default input (pin failed, status \(status))"
-                }
-            } else {
-                NSLog("claurp: input node has no audioUnit; cannot pin built-in mic, continuing with default input")
-                deviceDescription = "default input (no audioUnit)"
-            }
+            deviceDescription = Self.pin(input, to: deviceID, label: "device \(deviceID)")
         } else {
             NSLog("claurp: no built-in input device found; continuing with default input")
             deviceDescription = "default input (no built-in device found)"

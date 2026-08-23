@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import SwiftUI
 import ClaurpSensesCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -8,10 +9,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pauseItem: NSMenuItem!
     private var reconnectItem: NSMenuItem!
     private var micDeniedItem: NSMenuItem!
+    private var micMenu: NSMenu!
     private var paused = false
     private var micDenied = false
     private let hudStore = HudStore()
     private let micLevelStore = MicLevelStore()
+    private let micTestRecorder = MicTestRecorder()
+    private var micTestWindowController: NSWindowController?
     private var notchPanel: NotchPanel!
     private var offlineHideTimer: Timer?
     private let pttHotKey = PttHotKey()
@@ -45,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             notifier: notifier)
 
         controller.onMicLevel = { [weak self] level in self?.micLevelStore.level = level }
+        controller.onMicChunkTap = { [weak self] chunk in self?.micTestRecorder.receive(chunk) }
 
         pttHotKey.onDown = { [weak self] in self?.controller.pttDown() }
         pttHotKey.onUp = { [weak self] in self?.controller.pttUp() }
@@ -131,6 +136,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(micDeniedItem)
 
         menu.addItem(.separator())
+
+        let micMenuItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        micMenu = NSMenu(title: "Microphone")
+        micMenu.delegate = self
+        micMenuItem.submenu = micMenu
+        menu.addItem(micMenuItem)
+
+        let testMicItem = NSMenuItem(title: "Test Microphone…",
+                                     action: #selector(openMicTester), keyEquivalent: "")
+        testMicItem.target = self
+        menu.addItem(testMicItem)
+
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit claurp", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -155,5 +173,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quitApp() {
         controller.quit()
         NSApp.terminate(nil)
+    }
+
+    @objc private func selectMicMenuItem(_ sender: NSMenuItem) {
+        selectMicrophone(uid: sender.representedObject as? String)
+    }
+
+    /// Sets/clears `claurpInputDeviceUID` and restarts capture so the new
+    /// device takes effect immediately, mirroring `MicCaptureEngine.start()`'s
+    /// device-selection order (spec: override UID first, else built-in pin).
+    /// If listening is currently paused, only the preference is updated —
+    /// the new device is picked up next time the mic actually starts.
+    private func selectMicrophone(uid: String?) {
+        if let uid {
+            UserDefaults.standard.set(uid, forKey: "claurpInputDeviceUID")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "claurpInputDeviceUID")
+        }
+        guard !paused else { return }
+        micEngine.stop()
+        do {
+            try micEngine.start()
+            DebugAudioLog.log("mic switch: \(self.micEngine.lastStartDescription)")
+        } catch {
+            NSLog("claurp: mic restart after device switch failed: %@", error.localizedDescription)
+        }
+    }
+
+    @objc private func openMicTester() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let existing = micTestWindowController {
+            existing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        let view = MicTesterView(levelStore: micLevelStore, recorder: micTestRecorder) { [weak self] in
+            self?.micEngine.lastStartDescription ?? "unknown"
+        }
+        let hosting = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Test Microphone"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        let windowController = NSWindowController(window: window)
+        micTestWindowController = windowController
+        windowController.showWindow(nil)
+    }
+}
+
+extension AppDelegate: NSMenuDelegate {
+    /// Rebuilds the "Microphone" submenu each time it opens, so the device
+    /// list and checkmark always reflect current hardware and the current
+    /// `claurpInputDeviceUID` selection.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === micMenu else { return }
+        menu.removeAllItems()
+        let currentUID = UserDefaults.standard.string(forKey: "claurpInputDeviceUID")
+
+        let defaultItem = NSMenuItem(title: "Built-in (default)",
+                                     action: #selector(selectMicMenuItem(_:)), keyEquivalent: "")
+        defaultItem.target = self
+        defaultItem.state = currentUID == nil ? .on : .off
+        menu.addItem(defaultItem)
+        menu.addItem(.separator())
+
+        for device in AudioInputDevice.allInputDevices() {
+            let item = NSMenuItem(title: device.name,
+                                  action: #selector(selectMicMenuItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = device.uid
+            item.state = (currentUID == device.uid) ? .on : .off
+            menu.addItem(item)
+        }
     }
 }

@@ -19,6 +19,10 @@ public final class SensesController {
     public private(set) var hud = HudState()
     public var onHudChange: ((HudState) -> Void)?
     public var onMicLevel: ((Float) -> Void)?
+    /// Fires with the exact same 16 kHz Int16 chunks sent to the daemon —
+    /// additive tap for the mic tester's "hear what claurp hears" recording,
+    /// independent of `onMicLevel` (RMS only) and `sendMicFrame` (wire).
+    public var onMicChunkTap: (([Int16]) -> Void)?
 
     public init(connection: ConnectionManager,
                 mic: MicCaptureType,
@@ -44,6 +48,7 @@ public final class SensesController {
         }
         mic.onChunk = { [weak self] chunk in
             self?.onMicLevel?(PcmLevel.rms(chunk))
+            self?.onMicChunkTap?(chunk)
             self?.connection.sendMicFrame(chunk)
         }
         connection.start()
