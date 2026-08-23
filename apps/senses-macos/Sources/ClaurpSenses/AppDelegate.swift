@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hudStore = HudStore()
     private var pillPanel: PillPanel!
     private var offlineHideTimer: Timer?
+    private let pttHotKey = PttHotKey()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let connection = ConnectionManager(
@@ -29,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             playback: TtsPlaybackController(scheduler: EnginePcmScheduler()),
             earcons: EarconPlayer(),
             notifier: notifier)
+
+        pttHotKey.onDown = { [weak self] in self?.controller.pttDown() }
+        pttHotKey.onUp = { [weak self] in self?.controller.pttUp() }
+        pttHotKey.register()
 
         notifier.onDecision = { [weak self] sessionId, requestId, decision in
             DispatchQueue.main.async {
