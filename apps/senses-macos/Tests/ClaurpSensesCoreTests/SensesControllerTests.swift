@@ -12,7 +12,11 @@ final class MockMic: MicCaptureType {
 
 final class MockEarcons: EarconPlayerType {
     var played: [EarconKind] = []
-    func play(_ kind: EarconKind) { played.append(kind) }
+    var onPlay: ((EarconKind) -> Void)? // callback for ordering tests
+    func play(_ kind: EarconKind) {
+        played.append(kind)
+        onPlay?(kind)
+    }
 }
 
 final class MockNotifier: NotificationPresenterType {
@@ -20,21 +24,54 @@ final class MockNotifier: NotificationPresenterType {
     func present(_ notify: NotifyPayload) { presented.append(notify) }
 }
 
+/// Wrapper around MockScheduler that logs flush events to a shared event log
+/// for verifying the wake-ack ordering invariant (barge-in before play).
+final class LoggingScheduler: PcmScheduler {
+    private let inner: MockScheduler
+    private let onFlush: () -> Void
+
+    init(inner: MockScheduler, onFlush: @escaping () -> Void) {
+        self.inner = inner
+        self.onFlush = onFlush
+    }
+
+    func schedule(_ pcm: [Int16]) { inner.schedule(pcm) }
+    func startPlayback() { inner.startPlayback() }
+    func stopAndFlush() {
+        inner.stopAndFlush()
+        onFlush()
+    }
+
+    // For test assertions on the underlying scheduler
+    var started: Int { inner.started }
+    var flushed: Int { inner.flushed }
+}
+
 final class SensesControllerTests: XCTestCase {
     var transport: MockTransport!
     var mic: MockMic!
-    var scheduler: MockScheduler!
+    var innerScheduler: MockScheduler!
+    var loggingScheduler: LoggingScheduler!
     var earcons: MockEarcons!
     var notifier: MockNotifier!
     var controller: SensesController!
+    var eventLog: [String] = []
 
     override func setUp() {
         super.setUp()
         transport = MockTransport()
         mic = MockMic()
-        scheduler = MockScheduler()
+        innerScheduler = MockScheduler()
         earcons = MockEarcons()
         notifier = MockNotifier()
+        eventLog = []
+        loggingScheduler = LoggingScheduler(inner: innerScheduler) { [weak self] in
+            self?.eventLog.append("bargeIn()")
+        }
+        earcons.onPlay = { [self] kind in
+            self.eventLog.append("play(\(kind.rawValue))")
+        }
+
         let connection = ConnectionManager(
             url: URL(string: "ws://127.0.0.1:8765")!,
             transport: transport,
@@ -43,7 +80,7 @@ final class SensesControllerTests: XCTestCase {
         controller = SensesController(
             connection: connection,
             mic: mic,
-            playback: TtsPlaybackController(scheduler: scheduler, prerollSamples: 100),
+            playback: TtsPlaybackController(scheduler: loggingScheduler, prerollSamples: 100),
             earcons: earcons,
             notifier: notifier)
         controller.start()
@@ -67,22 +104,25 @@ final class SensesControllerTests: XCTestCase {
 
     func testSpeakStopBargesIn() {
         transport.onEvent?(.data(FrameCodec.encode(.ttsPcm24k, pcm: [Int16](repeating: 0, count: 200))))
-        XCTAssertEqual(scheduler.started, 1)
+        XCTAssertEqual(loggingScheduler.started, 1)
         daemon(#"{"v":1,"type":"speak.stop"}"#)
-        XCTAssertEqual(scheduler.flushed, 1)
+        XCTAssertEqual(loggingScheduler.flushed, 1)
     }
 
     func testWakeAckEarconBargesInAndPlays() {
         transport.onEvent?(.data(FrameCodec.encode(.ttsPcm24k, pcm: [Int16](repeating: 0, count: 200))))
         daemon(#"{"v":1,"type":"earcon","kind":"wake-ack"}"#)
-        XCTAssertEqual(scheduler.flushed, 1)
+        XCTAssertEqual(loggingScheduler.flushed, 1)
         XCTAssertEqual(earcons.played, [.wakeAck])
+        // Verify ordering invariant: bargeIn() must happen before play()
+        XCTAssertEqual(eventLog, ["bargeIn()", "play(wake-ack)"],
+                       "wake-ack barge-in must occur strictly before play (spec §3.2)")
     }
 
     func testNonWakeEarconPlaysWithoutBargeIn() {
         transport.onEvent?(.data(FrameCodec.encode(.ttsPcm24k, pcm: [Int16](repeating: 0, count: 200))))
         daemon(#"{"v":1,"type":"earcon","kind":"done"}"#)
-        XCTAssertEqual(scheduler.flushed, 0)
+        XCTAssertEqual(loggingScheduler.flushed, 0)
         XCTAssertEqual(earcons.played, [.done])
     }
 
@@ -126,5 +166,25 @@ final class SensesControllerTests: XCTestCase {
         controller.pttUp()
         XCTAssertTrue(transport.sentTexts.contains { $0.contains("\"action\":\"down\"") })
         XCTAssertTrue(transport.sentTexts.contains { $0.contains("\"action\":\"up\"") })
+    }
+
+    func testQuitStopsMicFlushesAndClosesConnection() {
+        // Pre-condition: buffer some audio to play
+        transport.onEvent?(.data(FrameCodec.encode(.ttsPcm24k, pcm: [Int16](repeating: 0, count: 200))))
+        XCTAssertEqual(mic.startCount, 1)
+        XCTAssertTrue(mic.isRunning)
+
+        // Invoke quit
+        controller.quit()
+
+        // Verify mic stopped
+        XCTAssertEqual(mic.stopCount, 1)
+        XCTAssertFalse(mic.isRunning)
+
+        // Verify playback flushed (barge-in called)
+        XCTAssertEqual(loggingScheduler.flushed, 1)
+
+        // Verify connection closed
+        XCTAssertEqual(transport.closeCount, 1)
     }
 }
