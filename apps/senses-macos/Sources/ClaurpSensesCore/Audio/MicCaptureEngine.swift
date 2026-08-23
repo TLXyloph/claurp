@@ -1,4 +1,6 @@
 import AVFoundation
+import AudioUnit
+import CoreAudio
 
 public protocol MicCaptureType: AnyObject {
     var onChunk: (([Int16]) -> Void)? { get set }
@@ -22,10 +24,41 @@ public final class MicCaptureEngine: MicCaptureType {
     public func start() throws {
         guard !isRunning else { return }
         let input = engine.inputNode
+        // Pin capture to the built-in mic BEFORE enabling voice processing.
+        // VPIO aggregates every input device (built-in mic, BlackHole, Teams,
+        // etc.) into one multi-channel input, and which device lands on
+        // channel 0 is not guaranteed to be the real mic — it can be a
+        // silent virtual device, starving the daemon of real audio. Pinning
+        // first keeps channel 0 on the real mic (spec §3.1).
+        if UserDefaults.standard.bool(forKey: "claurpUseDefaultInput") {
+            NSLog("claurp: claurpUseDefaultInput set; using system default input device")
+        } else if let deviceID = AudioInputDevice.builtInInputID() {
+            if let audioUnit = input.audioUnit {
+                var deviceIDVar = deviceID
+                let status = AudioUnitSetProperty(
+                    audioUnit,
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    &deviceIDVar,
+                    UInt32(MemoryLayout<AudioDeviceID>.size))
+                if status == noErr {
+                    NSLog("claurp: pinned capture input to built-in mic (device \(deviceID))")
+                } else {
+                    NSLog("claurp: failed to pin capture input to built-in mic (device \(deviceID)), status \(status); continuing with default input")
+                }
+            } else {
+                NSLog("claurp: input node has no audioUnit; cannot pin built-in mic, continuing with default input")
+            }
+        } else {
+            NSLog("claurp: no built-in input device found; continuing with default input")
+        }
         // AEC subtracts our own device playback (earcons, TTS) from the
         // captured signal so the daemon never hears — and phantom-transcribes
         // — the app's own speaker output (spec §3.1).
-        if (try? input.setVoiceProcessingEnabled(true)) == nil {
+        if UserDefaults.standard.bool(forKey: "claurpDisableAEC") {
+            NSLog("claurp: claurpDisableAEC set; skipping voice processing (AEC)")
+        } else if (try? input.setVoiceProcessingEnabled(true)) == nil {
             NSLog("claurp: failed to enable voice processing (AEC); continuing un-cancelled")
         } else {
             // Voice processing ducks other audio (our TTS) by default; disable
@@ -36,6 +69,7 @@ public final class MicCaptureEngine: MicCaptureType {
         // Query the format AFTER enabling voice processing — it can change
         // the input node's format (e.g. to 16 kHz mono for AEC processing).
         let format = input.inputFormat(forBus: 0)
+        NSLog("claurp: negotiated input format sampleRate=\(format.sampleRate) channelCount=\(format.channelCount)")
         resampler = MicResampler(inputSampleRate: format.sampleRate)
         chunker.reset()
         // No input device (e.g. a headless Mac): inputFormat(forBus:) returns a

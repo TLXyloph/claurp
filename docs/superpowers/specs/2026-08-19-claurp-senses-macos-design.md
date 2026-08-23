@@ -104,6 +104,10 @@ gap; see §8).
   (320 samples / 640 bytes) to keep wake-word latency low.
 - The mic input is voice-processed (AEC) so the daemon never hears the
   app's own earcons or TTS played back through the speakers.
+- Input is pinned to the built-in microphone before voice processing is
+  enabled (voice-processing aggregates make the default-device channel
+  layout unreliable); `claurpUseDefaultInput`/`claurpDisableAEC`
+  UserDefaults escape hatches exist.
 - **Streaming is continuous by default** — the daemon owns wake-word
   detection, so "hey claude" only works if audio is always flowing.
   Privacy posture: audio goes to a loopback-bound local daemon and
