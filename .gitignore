@@ -11,3 +11,4 @@ demo-out.wav
 .swiftpm/
 DerivedData/
 *.xcodeproj
+apps/senses-macos/Sources/ClaurpSenses/Info.plist
