@@ -18,6 +18,7 @@ public final class SensesController {
 
     public private(set) var hud = HudState()
     public var onHudChange: ((HudState) -> Void)?
+    public var onMicLevel: ((Float) -> Void)?
 
     public init(connection: ConnectionManager,
                 mic: MicCaptureType,
@@ -42,6 +43,7 @@ public final class SensesController {
             self?.playback.receive(pcm)
         }
         mic.onChunk = { [weak self] chunk in
+            self?.onMicLevel?(PcmLevel.rms(chunk))
             self?.connection.sendMicFrame(chunk)
         }
         connection.start()

@@ -161,6 +161,13 @@ final class SensesControllerTests: XCTestCase {
         XCTAssertFalse(controller.hud.paused)
     }
 
+    func testMicChunkEmitsOnMicLevel() {
+        var levels: [Float] = []
+        controller.onMicLevel = { levels.append($0) }
+        mic.onChunk?([Int16](repeating: 16384, count: 320))
+        XCTAssertEqual(levels.last ?? -1, 0.5, accuracy: 0.01)
+    }
+
     func testPttSendsDownAndUp() {
         controller.pttDown()
         controller.pttUp()
