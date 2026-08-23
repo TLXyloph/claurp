@@ -58,7 +58,9 @@ jobs:
 
   senses:
     name: senses (swift test · app build)
-    runs-on: macos-14
+    # macos-15: default Xcode 16.x — XcodeGen (run under Xcode 16 locally)
+    # emits a project format Xcode 15.4 (macos-14 default) cannot open.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
