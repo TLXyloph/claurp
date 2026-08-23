@@ -48,3 +48,33 @@ jobs:
 
       - name: Test
         run: pnpm -r test
+
+      # The Swift app replays these fixtures; if the TS schemas change without
+      # regenerating + committing them, fail here (no Mac needed to catch drift).
+      - name: Golden fixture drift gate
+        run: |
+          pnpm --filter @claurp/protocol golden
+          git diff --exit-code -- apps/senses-macos/Tests/ClaurpSensesCoreTests/Fixtures
+
+  senses:
+    name: senses (swift test · app build)
+    # macos-15: default Xcode 16.x — XcodeGen (run under Xcode 16 locally)
+    # emits a project format Xcode 15.4 (macos-14 default) cannot open.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift tests
+        run: swift test --package-path apps/senses-macos
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec apps/senses-macos/project.yml --project apps/senses-macos
+
+      - name: Build app (unsigned)
+        run: >
+          xcodebuild -project apps/senses-macos/ClaurpSenses.xcodeproj
+          -scheme ClaurpSenses -configuration Debug build
+          CODE_SIGNING_ALLOWED=NO

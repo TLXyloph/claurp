@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "hud.session",
+  "sessionId": "s-1",
+  "label": "notes app",
+  "state": "handed-off",
+  "permissionMode": "default",
+  "narration": "In your terminal."
+}

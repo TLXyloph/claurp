@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "notify",
+  "title": "notes app needs permission",
+  "body": "Bash: rm -r build/",
+  "sessionId": "s-1",
+  "requestId": "r-1",
+  "actions": [
+    "allow",
+    "deny"
+  ]
+}

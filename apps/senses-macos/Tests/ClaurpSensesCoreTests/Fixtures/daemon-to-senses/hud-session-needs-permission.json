@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "hud.session",
+  "sessionId": "s-1",
+  "label": "notes app",
+  "state": "needs-permission",
+  "permissionMode": "bypassPermissions",
+  "narration": "Waiting on you."
+}

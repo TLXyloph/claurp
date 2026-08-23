@@ -1,60 +1,65 @@
 # claurp — Handoff
 
-_Last updated 2026-08-19. Placed in `docs/` (not repo root) per CLAURP CLAUDE.md's no-root-markdown rule. Uncommitted working file — not part of PR #1._
+_Last updated 2026-08-23 (~00:45 local), end of the Plan 2 + live-smoke session. Lives in `docs/` per the no-root-markdown rule; committed on branch `worktree-v02-senses`._
 
 ## Goal
 
-Build **claurp**: an open-source, wake-word voice interface for CLI coding agents (Claude Code first). Say "hey claude, …" → a real agent session spawns, narrates aloud, asks risky permissions by voice, hands off to a terminal on request. Later: multimodal capture ("look at my screen" + cursor-ink deixis, "check this out" camera). **Bridge, not harness** — always spawn the user's real agent under their own login so flat subscriptions keep working.
-
-- Public repo: **https://github.com/TLXyloph/claurp** (owner TLXyloph). Local dir still named `wakeWord`.
-- Spec: `docs/superpowers/specs/2026-08-18-claurp-design.md`
-- Project memory: `~/.claude/projects/.../memory/claurp-project.md` (has hard-won technical facts).
-- Prior-art survey artifact: https://claude.ai/code/artifact/9aaf9dcc-2353-46e5-957c-fff9f818cc42
+**claurp**: open-source wake-word voice interface for CLI coding agents (Claude Code first). "hey claude, …" → real agent session, narrated aloud, permission-by-voice, terminal handoff. Bridge, not harness. Repo: https://github.com/TLXyloph/claurp (local dir `wakeWord`).
 
 ## Current Progress
 
-### Plan 1 — v0.1 core (protocol + daemon): DONE, shipped as PR #1
-- **PR #1: https://github.com/TLXyloph/claurp/pull/1** (branch `worktree-v01-core` → `main`, **not yet merged**). CI is **green**.
-- Worktree lives at `.claude/worktrees/v01-core` (kept for PR-feedback iteration).
-- Built, all reviewed task-by-task via superpowers subagent-driven-development: `@claurp/protocol` (WS message + binary-frame contract, the frozen spine) and `@claurp/daemon` (Silero VAD → sherpa-onnx wake → whisper.cpp STT → smart-turn v3; intent router; session manager; hardened permission deny-list; usage meter; rule-based narrator; Kokoro TTS in an isolated child process; WS server + CLI + demo + e2e). **256 tests.**
-- Plan doc: `docs/superpowers/plans/2026-08-18-claurp-v01-core.md` (16 tasks).
-- CI: `.github/workflows/ci.yml` — ubuntu, `pnpm install → build → lint → test` (build MUST precede lint/test so `@claurp/protocol` dist resolves). Model/brew-dependent audio tests self-skip; `CLAURP_SKIP_TTS=1` skips the real-Kokoro test.
+- **Plan 1 (protocol + daemon): merged** (PR #1, commit 88ff4d7 on main). 249 daemon tests + protocol suite.
+- **Plan 2 (Swift senses macOS app): COMPLETE — PR #2 open, CI green (both jobs): https://github.com/TLXyloph/claurp/pull/2**
+  - Branch `worktree-v02-senses`, worktree at `.claude/worktrees/v02-senses` (kept for PR iteration).
+  - Spec: `docs/superpowers/specs/2026-08-19-claurp-senses-macos-design.md` (amended during smoke). Plan: `docs/superpowers/plans/2026-08-19-claurp-senses-macos.md`.
+  - Built via superpowers SDD: 17 tasks, per-task independent reviews, final whole-branch review + fix wave. 77 Swift tests + TS suites green.
+  - Shipped: protocol Codable mirror locked by 30 golden fixtures (+ Linux CI drift gate), mic capture (pinned built-in device), TTS playback w/ pre-roll + barge-in, connection state machine, **notch drop-down HUD** (replaced the spec's original pill at user request) with **level-reactive waveform**, mic **switcher** (menu) + **tester** (record 3 s → play back what the daemon hears → `/tmp/claurp-mic-test.wav`), file diagnostics (`/tmp/claurp-senses.log`), earcons (wake-ack beep **muted by default** per user), notifications, ⌥Space PTT, macOS CI job (must run `macos-15`: Xcode 16 emits project objectVersion 77 that Xcode 15.4 can't open).
+- **Live smoke: the full loop closed once** (wake → transcript → session → spoken answer) in a quiet room with continuous speech — but real-cadence usage exposed a **daemon remediation backlog** (below), which is the next plan.
+- **voiceos-bridge**: separate idea seeded at `~/Desktop/personal-proj/voiceos-bridge/handoff.md` (voiceOS = WakoAI's Fn-activated notch assistant; its SDK is outbound-only MCP — "feed it video" likely must invert to a screen-capture tool voiceOS calls). Untouched otherwise.
 
-### Plan 2 — Swift "senses" macOS app: MID-BRAINSTORM, design presented, AWAITING APPROVAL
-The app is a pure WS client (audio + HUD) speaking the frozen protocol. **Three foundational decisions already made with the user:**
-1. **Connect-only** — the app connects to a separately-run daemon (`ws://127.0.0.1:8765`); it does NOT spawn/supervise the daemon (that's Plan 3). Shows an "offline" state + backoff reconnect when the daemon is down.
-2. **HUD scope = menu-bar icon + compact floating pill** (no session roster / history panel). Pill shows: live transcript while listening; session label + latest narration while working; a permission card with Allow/Deny when needs-you. Plus earcons + native notifications.
-3. **Build = SwiftPM library (`ClaurpSensesCore`, unit-testable logic: protocol Codable mirror, PCM resampler, connection state machine, view-models) + a thin app target wrapped into an `.app` via XcodeGen `project.yml`.** Tests run `swift test` on a macOS CI runner.
+## Daemon remediation backlog (NEXT PLAN — all live-evidenced 2026-08-23)
 
-**Design presented in chat (the six sections A–F), not yet approved:**
-- A. Module layout (SwiftPM lib + XcodeGen app).
-- B. Audio: mic → 16 kHz mono PCM16 → `BIN_MIC_PCM16_16K` streamed continuously (menu-bar "Pause listening" toggle; continuous is the privacy default, react if wrong). TTS: `BIN_TTS_PCM16_24K` → AVAudioEngine player @24 kHz; **barge-in on `speak.stop`/wake**.
-- C. HUD: menu-bar state, floating `NSPanel` pill, 4 earcons, `UNUserNotificationCenter` with Allow/Deny actions, global PTT hotkey → `ptt` down/up.
-- D. Connection: hello, respond to WS pings (daemon watchdog), backoff reconnect, offline state.
-- E. **Testing — the key cross-language risk is the Swift client drifting from the frozen TS protocol.** Mitigation: a daemon-side script emits **golden fixtures** (canonical JSON for every message + sample binary frames), committed; Swift XCTest replays/round-trips them and fails on mismatch. Plus resampler + message→HUD-state unit tests. macOS CI job runs `swift test`; the existing Linux job keeps running the daemon.
-- F. Scope: OUT = screen/ink/camera (v0.2/v0.3), daemon spawning/packaging/signing (Plan 3), expandable roster. **Honest gap:** `notify`'s `open-terminal` action has no senses→daemon wire path (protocol only has hello/ptt/permission.response), so Plan 2 renders only Allow/Deny actions; open-terminal deferred to a future protocol extension.
+Priority order; #1–#2 are the product-makers:
 
-**Open user threads at pause:**
-- User flagged **TTS naturalness as a priority.** Answer given: the voice engine is a DAEMON concern (Kokoro local = decent-not-premium). The lever for genuine naturalness is a **pluggable premium-voice adapter in the daemon — Cartesia Sonic (~90ms) or ElevenLabs Flash, BYO key** — a small daemon task worth scheduling. Plan 2's own naturalness responsibility = **gapless, low-latency PCM playback + instant barge-in** (must be an explicit, tested spec requirement — choppy playback ruins any voice).
-- User has NOT yet approved the Plan 2 design. Next real step is to get that approval (or edits), THEN write the spec.
+1. **Wake→capture handoff drops leading audio.** Saying "hey claude what's my usage" in one breath transcribes only the last word(s); with a pause after wake it captures 0.4 s of silence. Capture must start from the wake word's end offset via a ring/lookback buffer (sherpa KWS reports keyword timing) instead of "whenever the pipeline transitions". **The e2e suite masks this**: it anchors assertions on late words in the fixture sentences (the documented whisper-flakiness workaround), so front-truncation passes.
+2. **No speech-onset grace after wake.** Natural pause → VAD/turn instantly closes → constant 6656-sample (0.4 s) utterance → `[BLANK_AUDIO]`. After wake: wait up to ~5 s for voiced onset before arming turn-end; reject turns < ~0.5 s.
+3. **Router spawns sessions from `[BLANK_AUDIO]`** (and junk) — narrates "starting blank audio", burns tokens. Filter and return to listening.
+4. **Stuck-in-listening**: in some flows wake never re-arms; only a daemon restart recovers. Audit the pipeline state machine re-arm paths.
+5. **Narrator verbosity + latency**: reads entire permission/notification text aloud; responses feel slow (Kokoro synth + whisper + spawn). Tighten narration tiers; consider the standing premium-TTS adapter here.
+6. **No state replay on senses reconnect**: pending `hud.permission` isn't re-sent, stranding the HUD in needs-you with no card (daemon also stays blocked). Replay pending cards + session roster on hello.
+7. Minor: whisper worker slow/degraded under load once; sherpa circular-buffer overflow warning under glitchy streams (self-heals).
+
+New test assets needed: fixture WAVs with **wake + pause + command** and wake+command gaps at various cadences; assert on FIRST words of commands to kill the masking in #1.
 
 ## What Worked
-- **superpowers brainstorming → writing-plans → subagent-driven-development** end to end: fresh implementer + independent reviewer per task, adversarial (opus) security passes, a whole-branch final review. Caught real bugs per-task reviews couldn't (e.g. the WS server binding `0.0.0.0` with no auth).
-- Frozen test files + frozen interfaces per task kept implementers honest; vendor-API "adapt-the-wrapper-only" notes handled real API drift.
-- Verifying CI actually ran (not trusting a wrapper's exit code) caught the build-before-lint ordering bug.
+
+- Full superpowers chain end-to-end: brainstorm (resumed via handoff) → spec → 17-task plan → SDD with fresh implementer + reviewer per task → final review + fix wave. Reviews caught real bugs pre-merge (post-stop chunk race, stale WS delegate callbacks, unenforced barge-in ordering test).
+- Golden fixtures + Linux drift gate: cross-language contract locked without a Mac in CI's loop; Swift replay passed first try.
+- Live debugging discipline that finally cracked the mic mystery: **content-reactivity tests beat RMS levels** (see below), file-based app diagnostics (`/tmp/claurp-senses.log`), a passive WS **observer** client printing every daemon message live, and a WS **injector** streaming fixture WAVs as real mic frames (both trivial node scripts against `ws`; recreate in ~40 lines — connect, hello, stream 320-sample 0x01 frames at 20 ms cadence).
 
 ## What Didn't Work (do NOT repeat)
-- **smart-turn-v3.onnx takes Whisper log-mel `[1,80,800]`, NOT raw PCM** (output logit already sigmoid-applied). `mel.ts` is a from-scratch port of pipecat's `_whisper_features.py` (BSD-2, attributed).
-- **smart-turn INVERTS on macOS `say` default voice** (flat prosody). Fixtures use `say -v Karen` + ≤200 ms tail-trim in `turn.ts`; Shelley is the fallback voice.
-- **kokoro-js + onnxruntime-node CRASH in one process** → Kokoro TTS MUST run in a child process (IPC `serialization:"advanced"`). `HF_HOME` is a no-op for kokoro-js; set `@huggingface/transformers` `env.cacheDir` in the worker.
-- whisper mis-transcribes the fixture's trailing "haiku" ~40% of runs → tests anchor on reliably-transcribed "file"/"notes" instead.
-- CI: running `lint` before `build` fails because the daemon resolves `@claurp/protocol` from built dist.
+
+- **`setVoiceProcessingEnabled(true)` (AEC) on macOS made the input a 9-channel aggregate of ALL input devices** (BlackHole/Teams/iPhone included); channel 0 landed on a silent virtual device → the daemon received noise. Even pinned it stayed unreliable. AEC is now OFF on the user's machine via `defaults write dev.claurp.senses claurpDisableAEC -bool true` — **TODO: flip the in-code default to AEC-off before/at PR #2 merge** (beep is muted, so AEC's original purpose is gone; revisit only for daemon-TTS self-hearing, ideally as senses-side half-duplex gating while TTS plays).
+- **Validating audio by RMS alone** — twice "validated" a broken path because noise is loud. Always test *reactivity* (level responds to `say` playback) or *content* (record → transcribe/listen).
+- Room noise matters: floor ~0.07–0.13 RMS drowned the wake/turn stack; quiet room (~0.002) worked. The daemon has no noise robustness yet (#2/#5 above).
+- macos-14 CI runners (Xcode 15.4) can't open Xcode-16-generated projects (objectVersion 77) — `senses` job pins `macos-15`.
+- A stray `intake_playground.py` had squatted port 8765 for 22 days — first "nothing happened" was just that. Check `lsof -iTCP:8765` before blaming code.
+- Plan 1 lore that still holds: smart-turn needs `say -v Karen` fixtures; kokoro must live in a child process; tsx is a runtime dep (Plan 3).
+
+## Environment / how to run
+
+- Xcode 16.2 at /Applications (xcode-select set, license accepted); xcodegen 2.46 (brew). Models in `~/.claurp/models` (complete).
+- Daemon: `node packages/daemon/dist/cli.js` (build first: `pnpm -r build`). App: `xcodegen generate && xcodebuild …` in `apps/senses-macos`, product in DerivedData (`ClaurpSenses-*/Build/Products/Debug/ClaurpSenses.app`).
+- User-machine defaults currently set: `claurpDisableAEC=true`, `claurpInputDeviceUID` = built-in mic (via the in-app switcher).
+- SDD ledger (rulings, deferred minors): `.claude/worktrees/v02-senses/.superpowers/sdd/2026-08-19-claurp-senses-macos/progress.md` (gitignored — dies with the worktree; key decisions are reflected in this file and the spec).
 
 ## Next Steps
-1. **Resume the Plan 2 brainstorm**: get the user's approval (or edits) on the six-section design above — especially the continuous-mic-with-pause privacy default, dropping `open-terminal` for now, and the golden-fixture cross-language sync approach.
-2. On approval: write the spec to `docs/superpowers/specs/2026-08-19-claurp-senses-macos-design.md`, self-review, get user review, then invoke **superpowers:writing-plans**.
-3. Standing recommendations to schedule (not blockers): a **premium-voice TTS adapter** in the daemon (naturalness); a **macOS CI job** for `swift test`; the **`open-terminal` protocol extension**; and Plan 3 concerns (`tsx` is currently a runtime dep — precompile the TTS worker for packaging; daemon spawning; signing).
-4. Decisions already accepted by the user (don't relitigate): sherpa KWS model license = Apache-2.0; `bypassPermissions` mode kept for v0.1 despite disabling the hard-deny backstop (documented spec §5.4); PR (not local merge) for integration.
+
+1. **Merge PR #2** when ready (app side is done; two small pre-merge nits if desired: flip AEC default off in code; the reviewer-noted stale-buffer race on mic switch).
+2. **Daemon remediation plan** (the backlog above) — fresh session: superpowers brainstorming → spec (or spec amendment to Plan 1's) → writing-plans → SDD. Start scoping from backlog #1/#2 + the new pause-fixtures.
+3. Standing (unchanged): premium-voice TTS adapter (daemon), `open-terminal` protocol extension, Plan 3 (npx packaging, daemon spawn, signing; precompile TTS worker).
+4. Optional thread: voiceos-bridge brainstorm from its own handoff.
 
 ## How to resume
-Start a fresh conversation and point it at this file (`docs/HANDOFF.md`) plus the spec and project memory. The Plan 2 brainstorm is a superpowers architectural-path task paused at the "design presented, awaiting approval" gate — do NOT write the spec or any Swift code until the user approves the design.
+
+Fresh conversation → point it at this file (`docs/HANDOFF.md`) + the project memory. For the daemon work, read Plan 1's spec §4 (voice pipeline) and `packages/daemon/src/audio/pipeline.ts` first, and treat the backlog above as the problem statement — do NOT start coding before the brainstorm/spec gate.

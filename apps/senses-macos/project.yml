@@ -1,0 +1,33 @@
+name: ClaurpSenses
+options:
+  bundleIdPrefix: dev.claurp
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  ClaurpSensesCore:
+    path: .
+targets:
+  ClaurpSenses:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/ClaurpSenses
+      - path: Resources
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - package: ClaurpSensesCore
+        product: ClaurpSensesCore
+    info:
+      path: Sources/ClaurpSenses/Info.plist
+      properties:
+        CFBundleDisplayName: claurp
+        LSUIElement: true
+        NSMicrophoneUsageDescription: >-
+          claurp streams your microphone to the local claurp daemon so the
+          "hey claude" wake word works. Audio never leaves this Mac.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.claurp.senses
+        CODE_SIGN_IDENTITY: "-"
+        SWIFT_VERSION: "5.9"

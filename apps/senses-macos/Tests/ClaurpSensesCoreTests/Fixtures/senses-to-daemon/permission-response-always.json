@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "type": "permission.response",
+  "sessionId": "s-1",
+  "requestId": "r-1",
+  "decision": "always"
+}
